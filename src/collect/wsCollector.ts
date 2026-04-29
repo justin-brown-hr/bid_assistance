@@ -380,86 +380,44 @@ async function extractAuthFromBrowser(opts: {
       await login(page, opts.email, opts.password);
     }
 
-    // Navigate to search page and capture the WS auth hash
-    const searchUrl = new URL(`${BASE_URL}/search/projects`);
-    searchUrl.searchParams.set("projectSkills", opts.jobIds.join(","));
-    searchUrl.searchParams.set("projectLanguages", opts.languages.join(","));
-
+    // Extract auth hash directly from saved session cookies — no page navigation needed
     console.log("[ws] Capturing auth hash from browser...");
 
     let hash2 = "";
     let userId = 0;
 
-    // Navigate to search page
-    await page.goto(searchUrl.toString(), {
-      waitUntil: "domcontentloaded", timeout: 60000,
-    }).catch(() => {});
-
-    // Wait for Angular and WebSocket to initialize
-    await new Promise(r => setTimeout(r, 8000));
-
-    // Extract auth hash directly from the page's WebSocket connection
-    const authData = await page.evaluate(`
-      (function() {
-        // Try to get the hash from the GETAFREE_AUTH_HASH_V2 cookie
-        // which is the source of the hash2 value
-        var cookies = document.cookie.split(';');
-        var authHash = null;
-        var userId = null;
-        for (var i = 0; i < cookies.length; i++) {
-          var c = cookies[i].trim();
-          if (c.startsWith('GETAFREE_AUTH_HASH_V2=')) {
-            authHash = decodeURIComponent(c.slice('GETAFREE_AUTH_HASH_V2='.length));
-          }
-          if (c.startsWith('GETAFREE_USER_ID=')) {
-            userId = parseInt(c.slice('GETAFREE_USER_ID='.length));
-          }
+    // First try: extract from cookies directly (fastest, no navigation)
+    const savedSession = await loadSession();
+    if (savedSession) {
+      for (const c of savedSession.cookies) {
+        if (c.name === "GETAFREE_AUTH_HASH_V2") {
+          hash2 = decodeURIComponent(c.value);
         }
-        return { authHash: authHash, userId: userId };
-      })()
-    `) as { authHash: string | null; userId: number | null };
+        if (c.name === "GETAFREE_USER_ID") {
+          userId = parseInt(c.value);
+        }
+      }
+    }
 
-    if (authData.authHash && authData.userId) {
-      hash2 = authData.authHash;
-      userId = authData.userId;
+    // Fallback: extract from page cookies after session restore
+    if (!hash2) {
+      const pageCookies = await page.cookies();
+      for (const c of pageCookies) {
+        if (c.name === "GETAFREE_AUTH_HASH_V2") {
+          hash2 = decodeURIComponent(c.value);
+        }
+        if (c.name === "GETAFREE_USER_ID") {
+          userId = parseInt(c.value);
+        }
+      }
+    }
+
+    if (hash2 && userId) {
       console.log(`[ws] Auth from cookie: userId=${userId}`);
     }
 
-    // If cookie approach failed, try CDP to capture WS frame
     if (!hash2) {
-      console.log("[ws] Cookie approach failed, trying CDP frame capture...");
-      const cdp = await page.createCDPSession();
-      await cdp.send("Network.enable");
-
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => resolve(), 20000);
-        cdp.on("Network.webSocketFrameSent", (e) => {
-          const payload = e.response.payloadData;
-          if (!payload) return;
-          try {
-            const msgs = JSON.parse(payload) as string[];
-            for (const raw of msgs) {
-              const msg = JSON.parse(raw) as { channel: string; body: { hash2?: string; user_id?: number } };
-              if (msg.channel === "auth" && msg.body.hash2) {
-                hash2 = msg.body.hash2;
-                userId = msg.body.user_id ?? 0;
-                console.log("[ws] Auth hash captured from WS frame.");
-                clearTimeout(timeout);
-                resolve();
-              }
-            }
-          } catch { /* ignore */ }
-        });
-
-        // Re-navigate to trigger a new WS connection
-        page!.goto(searchUrl.toString(), {
-          waitUntil: "domcontentloaded", timeout: 30000,
-        }).catch(() => {});
-      });
-    }
-
-    if (!hash2) {
-      throw new Error("[ws] Could not capture auth hash from browser");
+      throw new Error("[ws] Could not capture auth hash from cookies");
     }
 
     const cookies = await page.cookies();
