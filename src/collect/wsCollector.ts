@@ -650,8 +650,29 @@ export class WsCollector {
   private _scheduleSessionRefresh(): void {
     const REFRESH_INTERVAL_MS = 1000 * 60 * 60 * 24 * 5; // 5 days
     setTimeout(async () => {
-      console.log("[ws] Refreshing session proactively...");
+      console.log("[ws] Refreshing session cookies proactively...");
       try {
+        // Just reload the session file and re-verify — no browser needed
+        // if session is still valid. Only launch browser if truly expired.
+        const session = await loadSession();
+        if (session) {
+          // Test if session cookies still work via direct API call
+          const cookieHeader = session.cookies.map(c => `${c.name}=${c.value}`).join("; ");
+          const res = await fetch(`${BASE_URL}/api/users/0.1/self/?compact=true`, {
+            headers: { "accept": "application/json", "cookie": cookieHeader },
+          });
+          const json = await res.json() as { status: string };
+          if (json.status === "success") {
+            // Session still valid — just update the savedAt timestamp
+            await saveSession(session.cookies);
+            setSessionCookies(session.cookies);
+            console.log("[ws] Session still valid, timestamp refreshed.");
+            this._scheduleSessionRefresh();
+            return;
+          }
+        }
+        // Session expired — need full re-auth via browser
+        console.log("[ws] Session expired, re-authenticating via browser...");
         const auth = await extractAuthFromBrowser({
           email: this.email,
           password: this.password,
@@ -665,7 +686,6 @@ export class WsCollector {
       } catch (e) {
         console.error("[ws] Session refresh failed:", e);
       }
-      // Schedule next refresh regardless of success
       this._scheduleSessionRefresh();
     }, REFRESH_INTERVAL_MS);
     console.log("[ws] Session auto-refresh scheduled every 5 days.");
