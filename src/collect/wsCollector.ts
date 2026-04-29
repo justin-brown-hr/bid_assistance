@@ -327,15 +327,47 @@ async function extractAuthFromBrowser(opts: {
   jobIds: number[];
   languages: string[];
 }): Promise<{ hash2: string; userId: number; cookies: SavedCookie[] }> {
-  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
+  // Step 1: Try to get auth hash directly from saved session cookies (no browser needed)
+  const session = await loadSession();
+  if (session) {
+    let hash2 = "";
+    let userId = 0;
+    for (const c of session.cookies) {
+      if (c.name === "GETAFREE_AUTH_HASH_V2") hash2 = decodeURIComponent(c.value);
+      if (c.name === "GETAFREE_USER_ID") userId = parseInt(c.value);
+    }
+    if (hash2 && userId) {
+      // Verify session is still valid via direct API call
+      const cookieHeader = session.cookies.map(c => `${c.name}=${c.value}`).join("; ");
+      try {
+        const res = await fetch(`${BASE_URL}/api/users/0.1/self/?compact=true`, {
+          headers: { "accept": "application/json", "cookie": cookieHeader,
+                     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        });
+        const json = await res.json() as { status: string; result?: { username?: string } };
+        if (json.status === "success") {
+          console.log(`[ws] Auth from cookie: userId=${userId} (no browser needed)`);
+          setSessionCookies(session.cookies);
+          return { hash2, userId, cookies: session.cookies };
+        }
+        console.log("[ws] Session cookie invalid, falling back to browser login...");
+      } catch {
+        console.log("[ws] Session check failed, falling back to browser login...");
+      }
+    }
+  }
+
+  // Step 2: Session expired — use browser to log in and get fresh cookies
+  console.log("[ws] Launching browser for login...");
+  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
   let browser: Browser | null = null;
   let page: Page | null = null;
 
   try {
     browser = await puppeteer.launch({
       executablePath: CHROME_PATH,
-      headless: process.env.HEADLESS !== "false", // headless by default, set HEADLESS=false to see browser
+      headless: process.env.HEADLESS !== "false",
       args: ["--no-sandbox", "--disable-setuid-sandbox",
              "--disable-blink-features=AutomationControlled",
              "--disable-dev-shm-usage", "--window-size=1280,800",
@@ -350,80 +382,22 @@ async function extractAuthFromBrowser(opts: {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
 
-    // Restore or create session
-    const session = await loadSession();
-    if (session && Date.now() - session.savedAt < 1000 * 60 * 60 * 24 * 30) {
-      console.log("[ws] Restoring saved session...");
-      await page.setCookie(...session.cookies);
-      setSessionCookies(session.cookies);
-      await page.goto(`${BASE_URL}/api/users/0.1/self/?compact=true`, {
-        waitUntil: "domcontentloaded", timeout: 15000,
-      }).catch(() => {});
+    await login(page, opts.email, opts.password);
 
-      const valid = await page.evaluate(async () => {
-        const r = await fetch("/api/users/0.1/self/?compact=true");
-        const d = await r.json() as { status: string; result?: { username?: string } };
-        return d.status === "success";
-      }).catch(() => false);
-
-      if (valid) {
-        console.log("[ws] Session valid.");
-        // Save refreshed cookies to extend expiry
-        const refreshedCookies = await page.cookies();
-        await saveSession(refreshedCookies);
-        setSessionCookies(refreshedCookies);
-      } else {
-        console.log("[ws] Session expired, logging in...");
-        await login(page, opts.email, opts.password);
-      }
-    } else {
-      await login(page, opts.email, opts.password);
-    }
-
-    // Extract auth hash directly from saved session cookies — no page navigation needed
-    console.log("[ws] Capturing auth hash from browser...");
-
+    // Extract hash from fresh cookies
+    const cookies = await page.cookies() as SavedCookie[];
     let hash2 = "";
     let userId = 0;
-
-    // First try: extract from cookies directly (fastest, no navigation)
-    const savedSession = await loadSession();
-    if (savedSession) {
-      for (const c of savedSession.cookies) {
-        if (c.name === "GETAFREE_AUTH_HASH_V2") {
-          hash2 = decodeURIComponent(c.value);
-        }
-        if (c.name === "GETAFREE_USER_ID") {
-          userId = parseInt(c.value);
-        }
-      }
+    for (const c of cookies) {
+      if (c.name === "GETAFREE_AUTH_HASH_V2") hash2 = decodeURIComponent(c.value);
+      if (c.name === "GETAFREE_USER_ID") userId = parseInt(c.value);
     }
 
-    // Fallback: extract from page cookies after session restore
-    if (!hash2) {
-      const pageCookies = await page.cookies();
-      for (const c of pageCookies) {
-        if (c.name === "GETAFREE_AUTH_HASH_V2") {
-          hash2 = decodeURIComponent(c.value);
-        }
-        if (c.name === "GETAFREE_USER_ID") {
-          userId = parseInt(c.value);
-        }
-      }
-    }
+    if (!hash2 || !userId) throw new Error("[ws] Could not get auth hash after login");
 
-    if (hash2 && userId) {
-      console.log(`[ws] Auth from cookie: userId=${userId}`);
-    }
-
-    if (!hash2) {
-      throw new Error("[ws] Could not capture auth hash from cookies");
-    }
-
-    const cookies = await page.cookies();
     await saveSession(cookies);
     setSessionCookies(cookies);
-
+    console.log(`[ws] Auth from fresh login: userId=${userId}`);
     return { hash2, userId, cookies };
   } finally {
     await browser?.close();
