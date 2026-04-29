@@ -1,0 +1,27 @@
+{
+  "name": "freelancer-notification",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "dotenv": "^16.6.1",
+    "openai": "^4.104.0",
+    "puppeteer-core": "^22.15.0",
+    "ws": "^8.18.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.33.0",
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.5.14",
+    "eslint": "^9.33.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

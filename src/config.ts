@@ -1,0 +1,96 @@
+import path from "node:path";
+import { statSync } from "node:fs";
+import { config as loadEnv } from "dotenv";
+
+// Ensure .env is loaded even if this module is imported before the entrypoint runs.
+const envPath = path.resolve(process.cwd(), ".env");
+try {
+  const st = statSync(envPath);
+  if (st.size === 0) {
+    console.error(
+      `[env] ${envPath} exists but is empty (0 bytes). Save your .env file content to disk and restart.`,
+    );
+  }
+} catch {
+  // ignore
+}
+const envRes = loadEnv({ path: envPath, override: true });
+if (envRes.error) {
+  console.error(`[env] failed to load ${envPath}: ${envRes.error.message}`);
+}
+
+function getEnv(name: string, fallback?: string): string {
+  const v = process.env[name];
+  if (v && v.trim().length > 0) return v.trim();
+  if (fallback !== undefined) return fallback;
+  throw new Error(`Missing required env var: ${name}`);
+}
+
+function getEnvOptional(name: string): string | undefined {
+  const v = process.env[name];
+  if (!v) return undefined;
+  const t = v.trim();
+  return t.length ? t : undefined;
+}
+
+function parseCsv(v: string | undefined): string[] {
+  if (!v) return [];
+  return v
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Parse a list of URLs separated by | (pipe).
+ * We use pipe instead of comma because search URLs contain commas in query params.
+ */
+function parseUrls(v: string | undefined): string[] {
+  if (!v) return [];
+  return v
+    .split("|")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const cfg = {
+  telegram: {
+    token: getEnvOptional("TELEGRAM_BOT_TOKEN"),
+    chatId: getEnvOptional("TELEGRAM_CHAT_ID"),
+  },
+  freelancer: {
+    oauthToken: getEnvOptional("FREELANCER_OAUTH_TOKEN"),
+    email: getEnvOptional("FREELANCER_EMAIL"),
+    password: getEnvOptional("FREELANCER_PASSWORD"),
+  },
+  searchUrls: parseUrls(getEnvOptional("FREELANCER_SEARCH_URLS")),
+  rules: {
+    requiredSkills: parseCsv(getEnvOptional("REQUIRED_SKILLS")).map((s) =>
+      s.toLowerCase(),
+    ),
+    minBudgetUsd: Number(getEnvOptional("MIN_BUDGET_USD") ?? "0"),
+    scamKeywords: parseCsv(getEnvOptional("SCAM_KEYWORDS")).map((s) =>
+      s.toLowerCase(),
+    ),
+  },
+  pollIntervalMs: Number(getEnvOptional("POLL_INTERVAL_MS") ?? "5000"),
+  ai: {
+    openaiApiKey: getEnvOptional("OPENAI_API_KEY"),
+    model: getEnvOptional("OPENAI_MODEL") ?? "gpt-4.1-mini",
+  },
+};
+
+export function assertStartupConfig() {
+  if (cfg.searchUrls.length === 0) {
+    throw new Error(
+      "FREELANCER_SEARCH_URLS must be set (comma-separated URLs).",
+    );
+  }
+  if (!cfg.telegram.token || !cfg.telegram.chatId) {
+    throw new Error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.");
+  }
+  if (!cfg.freelancer.email || !cfg.freelancer.password) {
+    throw new Error("FREELANCER_EMAIL and FREELANCER_PASSWORD must be set.");
+  }
+}
+
