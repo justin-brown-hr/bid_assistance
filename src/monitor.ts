@@ -216,21 +216,16 @@ export async function startMonitor() {
   await collector.init();
   console.log("[monitor] Real-time WebSocket monitor running. Waiting for new projects...");
 
-  // Global error handlers — send critical errors to Telegram
-  const sendError = (context: string, err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    const stack = err instanceof Error && err.stack ? err.stack.slice(0, 300) : "";
-    const text = `🚨 <b>Bot Error</b>\n\n<b>Context:</b> ${esc(context)}\n<b>Error:</b> ${esc(msg)}${stack ? `\n<b>Stack:</b> <code>${esc(stack)}</code>` : ""}`;
-    void tg.sendMessage(text).catch(() => {});
-    console.error(`[error] ${context}:`, err);
-  };
-
   process.on("uncaughtException", (err) => {
-    sendError("Uncaught Exception", err);
+    console.error("[error] Uncaught Exception:", err);
+    void tg.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Uncaught Exception\n<b>Error:</b> ${esc(String(err instanceof Error ? err.message : err))}`).catch(() => {});
+    // Don't exit — let PM2 handle restarts only for truly fatal errors
   });
 
   process.on("unhandledRejection", (reason) => {
-    sendError("Unhandled Promise Rejection", reason);
+    console.error("[error] Unhandled Rejection:", reason);
+    void tg.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Unhandled Rejection\n<b>Error:</b> ${esc(String(reason instanceof Error ? reason.message : reason))}`).catch(() => {});
+    // Don't exit
   });
 
   const shutdown = async () => {
