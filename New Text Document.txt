@@ -1,0 +1,4 @@
+$action = New-ScheduledTaskAction -Execute "C:\Program Files\Notification\Notification\start-bot.bat"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0
+Register-ScheduledTask -TaskName "FreelancerBot" -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
