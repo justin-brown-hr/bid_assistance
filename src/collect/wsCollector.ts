@@ -29,19 +29,23 @@ type WsProjectData = {
   currencyCode?: string;
   time_submitted?: number;
   time?: number;
-  submitDate?: string;           // "2026-04-28 02:48:20"
+  submitDate?: string;
   bid_stats?: { bid_count?: number | false };
   userName?: string;
   userId?: number;
   reviews?: number;
   completedProjects?: number;
   overallReputation?: number;
+  // Project type
+  projIsHourly?: boolean;
+  type?: string;
   // Project badges
   NDA?: boolean;
   sealed?: boolean;
   ip_contract?: boolean;
   nonpublic?: boolean;
   hideBids?: boolean;
+  recruiter?: boolean;
   client_status?: {
     identity_verified?: boolean;
     payment_verified?: boolean;
@@ -51,7 +55,6 @@ type WsProjectData = {
     profile_complete?: boolean;
     facebook_connected?: boolean;
   };
-  type?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -91,23 +94,23 @@ async function saveSession(cookies: SavedCookie[]): Promise<void> {
 
 function formatBudget(d: WsProjectData): string | undefined {
   const sign = d.currency?.sign ?? d.currencyCode ?? "$";
-  if (d.minbudget != null && d.maxbudget != null) return `${sign}${d.minbudget} – ${sign}${d.maxbudget}`;
-  if (d.minbudget != null) return `${sign}${d.minbudget}+`;
+  const type = d.projIsHourly ? "Hourly" : "Fixed";
+  if (d.minbudget != null && d.maxbudget != null) return `${type} ${sign}${d.minbudget}–${sign}${d.maxbudget}`;
+  if (d.minbudget != null) return `${type} ${sign}${d.minbudget}+`;
   return undefined;
 }
 
 function formatVerification(s: WsProjectData["client_status"]): string | undefined {
   if (!s) return undefined;
-  const v = "✅", x = "❌";
-  return [
-    `🪪 ${s.identity_verified ? v : x}`,
-    `💰 ${s.payment_verified ? v : x}`,
-    `💳 ${s.deposit_made ? v : x}`,
-    `✉️ ${s.email_verified ? v : x}`,
-    `📞 ${s.phone_verified ? v : x}`,
-    `📘 ${s.facebook_connected ? v : x}`,
-    `👤 ${s.profile_complete ? v : x}`,
-  ].join(" ");
+  const verified: string[] = [];
+  if (s.identity_verified) verified.push("ID");
+  if (s.payment_verified) verified.push("Payment");
+  if (s.deposit_made) verified.push("Deposit");
+  if (s.email_verified) verified.push("Mail");
+  if (s.phone_verified) verified.push("Phone");
+  if (s.facebook_connected) verified.push("FB");
+  if (s.profile_complete) verified.push("Profile");
+  return verified.length ? verified.join(", ") : "None";
 }
 
 function formatCompletion(d: WsProjectData): string | undefined {
@@ -145,12 +148,14 @@ function scoreProject(d: WsProjectData): ScoreResult {
   const breakdown: string[] = [];
   const countryCode = (d.currency?.country ?? "").toUpperCase();
 
-  // +30: Budget ≥ $500 USD equivalent
+  // +30: Budget threshold depends on project type
+  // Fixed: ≥ $500 USD equivalent | Hourly: ≥ $20/hr USD equivalent
   const exchangeRate = parseFloat(d.currency?.exchangerate ?? "1") || 1;
-  const budgetUsd = (d.maxbudget ?? d.minbudget ?? 0) * exchangeRate;
-  if (budgetUsd >= 500) {
+  const budgetValue = (d.maxbudget ?? d.minbudget ?? 0) * exchangeRate;
+  const budgetThreshold = d.projIsHourly ? 20 : 500;
+  if (budgetValue >= budgetThreshold) {
     score += 30;
-    breakdown.push("+30 budget≥$500");
+    breakdown.push(`+30 budget≥${d.projIsHourly ? "$20/hr" : "$500"}`);
   }
 
   // +10: Project posted within last 3 days (proxy for new/active client)
@@ -268,7 +273,7 @@ function countryFromData(d: WsProjectData): string | undefined {
   return `🌍 ${code}`;
 }
 
-function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: number): Project {
+function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: number, joinDate?: string): Project {
   const seoUrl = String(d.seo_url);
   const url = seoUrl.startsWith("http")
     ? seoUrl
@@ -290,19 +295,19 @@ function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: numbe
   if (complete != null && incomplete != null) {
     const total = complete + incomplete;
     const rate = complete === 0 ? "∞" : (total / complete).toFixed(2);
-    completionRateText = `✅ ${complete} / ❌ ${incomplete} (${rate})`;
+    completionRateText = `${complete}/${incomplete} (${rate})`;
   } else {
     const reviews = d.reviews ?? 0;
     const completed = d.completedProjects ?? 0;
     const ratio = reviews === 0 ? "∞" : (completed / reviews).toFixed(2);
-    completionRateText = `⭐ ${reviews} reviews / 📁 ${completed} (${ratio})`;
+    completionRateText = `${reviews}/${completed} (${ratio})`;
   }
 
   return {
     id: String(d.id),
     title: d.title,
     url,
-    description: d.appended_descr?.slice(0, 800),
+    description: d.appended_descr,
     skills,
     budgetText: formatBudget(d),
     postedAtText: d.time_submitted
@@ -314,6 +319,9 @@ function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: numbe
     completionRateText,
     proposalsText: bidCount,
     scoreText,
+    recruiter: d.recruiter === true,
+    projIsHourly: d.projIsHourly === true,
+    joinDate,
   };
 }
 
@@ -444,7 +452,7 @@ function setSessionCookies(cookies: SavedCookie[]): void {
     .join("; ");
 }
 
-async function fetchUserCountry(userId: number): Promise<{ countryCode?: string; complete?: number; incomplete?: number } | undefined> {
+async function fetchUserCountry(userId: number): Promise<{ countryCode?: string; complete?: number; incomplete?: number; joinDate?: string } | undefined> {
   if (!userId || !_sessionCookieHeader) return undefined;
   try {
     const url = `${BASE_URL}/api/users/0.1/users/?users[]=${userId}&user_details=true&user_location_details=true&user_employer_reputation=true&compact=true`;
@@ -460,6 +468,7 @@ async function fetchUserCountry(userId: number): Promise<{ countryCode?: string;
       result?: { users?: Record<string, {
         location?: { country?: { code?: string; name?: string } };
         employer_reputation?: { entire_history?: { complete?: number; incomplete?: number } };
+        registration_date?: number;
       }> };
     };
     if (json.status !== "success") return undefined;
@@ -467,10 +476,19 @@ async function fetchUserCountry(userId: number): Promise<{ countryCode?: string;
     const code = user?.location?.country?.code?.toUpperCase()
       ?? countryNameToCode(user?.location?.country?.name ?? "");
     const hist = user?.employer_reputation?.entire_history;
+
+    // Format join date as "Mon DD YYYY"
+    let joinDate: string | undefined;
+    if (user?.registration_date) {
+      const d = new Date(user.registration_date * 1000);
+      joinDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    }
+
     return {
       countryCode: code,
       complete: hist?.complete,
       incomplete: hist?.incomplete,
+      joinDate,
     };
   } catch {
     return undefined;
@@ -521,7 +539,7 @@ function countryNameToCode(name: string): string | undefined {
 }
 
 // Countries to block — 2-letter ISO codes
-const BLOCKED_COUNTRY_CODES = new Set(["IN", "PK", "BD", "NP", "NG"]);
+const BLOCKED_COUNTRY_CODES = new Set(["IN", "PK", "BD", "NP", "NG", "ID", "LK"]);
 
 // ---------------------------------------------------------------------------
 // WsCollector — connects directly via Node.js WebSocket
@@ -761,7 +779,7 @@ export class WsCollector {
         return;
       }
 
-      const project = wsDataToProject(data, userInfo?.complete, userInfo?.incomplete);
+      const project = wsDataToProject(data, userInfo?.complete, userInfo?.incomplete, userInfo?.joinDate);
       console.log(`[ws] 🆕 ${project.title.slice(0, 40)} | ${data.userName} | real_country=${realCountryCode ?? "?"} | shown=${project.clientCountry ?? "NONE"}`);
 
       if (this.onProject) {

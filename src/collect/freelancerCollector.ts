@@ -391,7 +391,7 @@ export class FreelancerCollector {
         id: String(p.id),
         title: p.title,
         url: `${BASE_URL}/projects/${p.seo_url}`,
-        description: p.description?.slice(0, 800),
+        description: p.description,
         skills: (p.jobs ?? []).map(j => j.name).filter(Boolean),
         budgetText: formatBudget(p),
         postedAtText: p.time_submitted

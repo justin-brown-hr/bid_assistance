@@ -13,11 +13,12 @@ export type Project = {
   clientName?: string;
   clientCountry?: string;
   clientVerificationText?: string;
-  /** e.g. "4.8 (23 reviews)" or "12 / 15" */
   completionRateText?: string;
   proposalsText?: string;
-  /** Quality score result e.g. "🟢 Cool (55/70)" */
   scoreText?: string;
+  recruiter?: boolean;
+  projIsHourly?: boolean;
+  joinDate?: string;
 };
 
 export type MatchResult = {

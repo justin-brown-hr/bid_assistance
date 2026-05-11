@@ -4,8 +4,6 @@ import { WsCollector } from "./collect/wsCollector.js";
 import { fastDecision } from "./fastFilter.js";
 import { SeenStore } from "./store/seenStore.js";
 import { TelegramClient } from "./notify/telegram.js";
-import { enrichProject } from "./ai/enrich.js";
-import { DashboardStore } from "./dashboard.js";
 import type { Project } from "./types.js";
 
 function esc(s: string) {
@@ -15,51 +13,39 @@ function esc(s: string) {
     .replaceAll(">", "&gt;");
 }
 
-function parseVerification(raw: string | undefined): string {
-  return raw ?? "—";
-}
-
-function formatInstant(project: Project, reasons: string[]) {
+function formatInstant(project: Project, _reasons: string[]) {
   const lines: string[] = [];
-  lines.push(`🆕 <b>${esc(project.title)}</b>`);
-  lines.push("");
 
+  // Line 1: (P) Title
+  const prefix = project.recruiter ? "🅿" : "";
+  lines.push(`${prefix} Title: <b>${esc(project.title)}</b>`);
+
+  // Line 2: Client Name | Flag Country | Join Date
   const clientName = project.clientName ? esc(project.clientName) : "Unknown";
-  const clientCountry = project.clientCountry ? ` ${esc(project.clientCountry)}` : "";
-  lines.push(`👤 <b>${clientName}</b>${clientCountry}`);
-  lines.push(`<b>Verification</b>: ${parseVerification(project.clientVerificationText)}`);
-  lines.push(`<b>Completion(%)</b>: ${esc(project.completionRateText ?? "✅ 0 / ❌ 0 (∞)")}`);
+  const country = project.clientCountry ? ` | ${esc(project.clientCountry)}` : "";
+  const joined = project.joinDate ? ` | ${esc(project.joinDate)}` : "";
+  lines.push(`👤${clientName}${country}${joined}`);
 
-  lines.push("");
-  if (project.budgetText) lines.push(`💰 <b>Budget</b>: ${esc(project.budgetText)}`);
-  lines.push("");
-  lines.push(`🔗 <b>Bid now</b>: <code>${esc(project.url)}</code>`);
-  lines.push(`<b>Analysis</b>: ${project.scoreText ?? "checking..."}`);
+  // Line 3: Verification — only verified items as names
+  const verif = project.clientVerificationText ?? "None";
+  lines.push(`✅ ${esc(verif)}`);
+
+  // Line 4: URL (plain, no label)
+  lines.push(`Bid: <code>${esc(project.url)}</code>`);
+
+  // Line 5: Skills (max 5, with label)
+  const skills = project.skills.slice(0, 5).join(", ") || "Unknown";
+  lines.push(`Skills: ${esc(skills)}`);
+
+  // Line 6: Budget | Rate | Analysis
+  const budget = project.budgetText ? esc(project.budgetText) : "—";
+  const rate = project.completionRateText ? esc(project.completionRateText) : "—";
+  const analysis = project.scoreText ? esc(project.scoreText) : "—";
+  lines.push(`${budget} | Rate: ${rate} | Analysis: ${analysis}`);
+
   return lines.join("\n");
 }
 
-function formatWithAI(base: string, ai: Awaited<ReturnType<typeof enrichProject>>) {
-  const lines = base.split("\n");
-  const idx = lines.findIndex((l) => l.startsWith(`🤖 <b>AI checker</b>:`));
-  // Preserve the score emoji from the existing line
-  const existingLine = idx >= 0 ? lines[idx] : "";
-  const scoreEmoji = existingLine.includes("😃") ? "😃" : existingLine.includes("😑") ? "😑" : "";
-  const scorePart = scoreEmoji ? existingLine.replace("🤖 <b>AI checker</b>:", "").trim() : "";
-  const aiLines = [
-    `🤖 <b>AI checker</b>: ${scorePart}`,
-    `  📝 <b>Summary</b>: ${esc(ai.summary)}`,
-    `  🎯 <b>Match</b>: ${ai.matchScore}/100`,
-    `  ⚠️ <b>Risk</b>: ${esc(ai.scamRisk)}`,
-    `  💡 <b>Bid angle</b>: ${esc(ai.bidAngle)}`,
-    `  💵 <b>Suggested price</b>: ${esc(ai.suggestedPrice)}`,
-  ];
-  if (idx >= 0) {
-    lines.splice(idx, 1, ...aiLines);
-  } else {
-    lines.push("", ...aiLines);
-  }
-  return lines.join("\n");
-}
 
 function parseSearchUrl(input: string): { jobIds: number[]; languages: string[] } {
   try {
@@ -86,46 +72,102 @@ export async function startMonitor() {
   store.pruneOlderThan(1000 * 60 * 60 * 24 * 7);
   await store.flush();
 
-  const dashboard = new DashboardStore(path.join("data", "dashboard.json"));
   const tg = new TelegramClient({
     token: cfg.telegram.token!,
     chatId: cfg.telegram.chatId!,
   });
 
-  // Track sent message IDs — auto-delete oldest when count exceeds MAX_MESSAGES
-  const MAX_MESSAGES = 100;
+  // Map project id → description for callback lookups
+  const descriptionMap = new Map<string, string>();
+  // Map project id → sent description message id (for toggle delete)
+  const descMsgIdMap = new Map<string, number>();
+
+  // Start polling for "📋 Description" / "🙈 Hide" button taps
+  tg.startPolling(async (data, chatId, queryId, notifMsgId) => {
+    await tg.answerCallbackQuery(queryId);
+
+    if (data.startsWith("show:")) {
+      const projectId = data.slice(5);
+      const desc = descriptionMap.get(projectId);
+      if (!desc) {
+        await tg.sendToChat(chatId, "Description not available.");
+        return;
+      }
+      // Send description message and track it
+      const msgId = await tg.sendToChatWithId(chatId, `<code>${esc(desc)}</code>`);
+      if (msgId) {
+        descMsgIdMap.set(projectId, msgId);
+        trackMessage(msgId);
+      }
+      // Swap button to "🙈 Hide"
+      await tg.editMessageReplyMarkup(chatId, notifMsgId, [[
+        { text: "🙈 Hide", callback_data: `hide:${projectId}` },
+      ]]);
+
+    } else if (data.startsWith("hide:")) {
+      const projectId = data.slice(5);
+      const descMsgId = descMsgIdMap.get(projectId);
+      if (descMsgId) {
+        await tg.deleteMessage(descMsgId, chatId);
+        descMsgIdMap.delete(projectId);
+        // Remove from tracking so it doesn't count toward the limit
+        const idx = sentMessageIds.indexOf(descMsgId);
+        if (idx !== -1) sentMessageIds.splice(idx, 1);
+      }
+      // Swap button back to "📋 Description"
+      await tg.editMessageReplyMarkup(chatId, notifMsgId, [[
+        { text: "📋 Description", callback_data: `show:${projectId}` },
+      ]]);
+    }
+  });
+
+  // Track sent message IDs in the primary chat — auto-delete oldest when count exceeds MAX_MESSAGES
+  const MAX_MESSAGES = 50;
   const sentMessageIds: number[] = [];
+
+  // Helper: push a message id and trim oldest if over limit
+  function trackMessage(msgId: number): void {
+    sentMessageIds.push(msgId);
+    if (sentMessageIds.length > MAX_MESSAGES) {
+      const oldId = sentMessageIds.shift()!;
+      void tg.deleteMessage(oldId).catch(() => {});
+      console.log(`[monitor] Auto-deleted old message ${oldId} (limit: ${MAX_MESSAGES})`);
+    }
+  }
 
   // Daily counters
   let dailyTotal = 0;
   let dailyCool = 0;
+  let dailyRecruiter = 0;
 
-  // Schedule daily report at 13:00 local time
+  // Schedule daily report at 1:00 PM PST = 21:00 UTC
   function scheduleDailyReport() {
     const now = new Date();
-    const next = new Date(now);
-    next.setHours(13, 0, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1); // already past 1pm today
+    const next = new Date();
+    // Set to next 21:00 UTC
+    next.setUTCHours(21, 0, 0, 0);
+    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
     const msUntil = next.getTime() - now.getTime();
-    console.log(`[monitor] Daily report scheduled in ${Math.round(msUntil / 60000)} minutes.`);
+    console.log(`[monitor] Daily report scheduled in ${Math.round(msUntil / 60000)} minutes (1:00 PM PST).`);
     setTimeout(async () => {
       const report = [
         `🌗 <b>Daily Report</b>`,
         ``,
         `📁 Total projects: <b>${dailyTotal}</b>`,
         `🎅 Cool projects: <b>${dailyCool}</b>`,
+        `(P) Recruiter projects: <b>${dailyRecruiter}</b>`,
         ``,
         `It was a great day, Let's go to Bed! 😴😴😴`,
       ].join("\n");
       try {
         await tg.sendMessage(report);
-        console.log(`[monitor] Daily report sent: total=${dailyTotal} cool=${dailyCool}`);
+        console.log(`[monitor] Daily report sent: total=${dailyTotal} cool=${dailyCool} recruiter=${dailyRecruiter}`);
       } catch (e) {
         console.error("[monitor] Daily report failed:", e);
       }
-      // Reset counters and schedule next day
       dailyTotal = 0;
       dailyCool = 0;
+      dailyRecruiter = 0;
       scheduleDailyReport();
     }, msUntil);
   }
@@ -162,48 +204,29 @@ export async function startMonitor() {
     // Count for daily report
     dailyTotal++;
     if (p.scoreText?.includes("🎅")) dailyCool++;
+    if (p.recruiter) dailyRecruiter++;
 
     // Send immediately — WebSocket already includes full client data
     const instantText = formatInstant(p, decision.reasons);
     let messageId: number | undefined;
     try {
-      messageId = await tg.sendMessage(instantText);
-      // Track message ID and auto-delete oldest if over limit
-      sentMessageIds.push(messageId);
-      if (sentMessageIds.length > MAX_MESSAGES) {
-        const oldId = sentMessageIds.shift()!;
-        void tg.deleteMessage(oldId).catch(() => {});
-        console.log(`[monitor] Auto-deleted old message ${oldId} (limit: ${MAX_MESSAGES})`);
+      // Store description for button callback (keyed by project id)
+      if (p.description) {
+        descriptionMap.set(p.id, p.description);
+        // Keep map from growing unbounded — drop oldest entries beyond 200
+        if (descriptionMap.size > 200) {
+          const firstKey = descriptionMap.keys().next().value;
+          if (firstKey !== undefined) descriptionMap.delete(firstKey);
+        }
       }
-      dashboard.recordFast(p);
-      await dashboard.flush();
+
+      messageId = p.description
+        ? await tg.sendMessageWithButton(instantText, p.id)
+        : await tg.sendMessage(instantText);
+      trackMessage(messageId);
     } catch (e) {
       console.error("[telegram] send failed", e);
       return;
-    }
-
-    // AI enrichment async (edits the message after)
-    if (cfg.ai.openaiApiKey) {
-      void (async () => {
-        try {
-          const ai = await enrichProject({
-            apiKey: cfg.ai.openaiApiKey!,
-            model: cfg.ai.model,
-            requiredSkills: cfg.rules.requiredSkills,
-            project: p,
-          });
-          await tg.editMessage(messageId!, formatWithAI(instantText, ai));
-          dashboard.recordAI(p.id, ai);
-          await dashboard.flush();
-        } catch (e) {
-          console.error("[ai] enrichment failed", e);
-        }
-      })();
-    } else {
-      void tg.editMessage(
-        messageId!,
-        instantText.replace("🤖 <b>AI checker</b>: checking...", "🤖 <b>AI checker</b>: disabled (no key)"),
-      ).catch(() => {});
     }
   }
 
