@@ -113,7 +113,7 @@ function formatVerification(s: WsProjectData["client_status"]): string | undefin
   return verified.length ? verified.join(", ") : "None";
 }
 
-function formatCompletion(d: WsProjectData): string | undefined {
+function _formatCompletion(d: WsProjectData): string | undefined {
   const reviews = d.reviews ?? 0;
   const completed = d.completedProjects ?? 0;
   const ratio = reviews === 0 ? "∞" : (completed / reviews).toFixed(2);
@@ -433,8 +433,33 @@ async function login(page: Page, email: string, password: string): Promise<void>
   try {
     await page.waitForFunction("!document.location.href.includes('/login')", { timeout: 60000 });
   } catch {
-    console.log("[ws] Please solve any CAPTCHA in the browser window (120s)...");
-    await page.waitForFunction("!document.location.href.includes('/login')", { timeout: 120000 });
+    const maxMs = Number(process.env.CAPTCHA_WAIT_MS ?? "0");
+    const headless = process.env.HEADLESS !== "false";
+    const allowLongWait = !headless;
+    const effectiveMaxMs = (allowLongWait && maxMs <= 0) ? 30 * 60 * 1000 : maxMs; // default 30m when headed
+
+    console.log(
+      `[ws] CAPTCHA likely required. Solve it in the browser window.` +
+      (effectiveMaxMs > 0 ? ` Waiting up to ${Math.round(effectiveMaxMs / 60000)} min...` : " Waiting indefinitely..."),
+    );
+
+    const start = Date.now();
+    // Wait in chunks so we can print progress and avoid a hard crash.
+    // If CAPTCHA_WAIT_MS is unset/0 and HEADLESS=false, this defaults to 30 minutes.
+    while (true) {
+      const elapsed = Date.now() - start;
+      if (effectiveMaxMs > 0 && elapsed >= effectiveMaxMs) {
+        throw new Error(`[ws] CAPTCHA not solved within ${Math.round(effectiveMaxMs / 60000)} minutes`);
+      }
+      const remaining = effectiveMaxMs > 0 ? Math.max(0, effectiveMaxMs - elapsed) : 5 * 60 * 1000;
+      const chunkMs = Math.min(5 * 60 * 1000, remaining || 5 * 60 * 1000);
+      try {
+        await page.waitForFunction("!document.location.href.includes('/login')", { timeout: chunkMs });
+        break;
+      } catch {
+        console.log("[ws] Still on login page — waiting for CAPTCHA/verification to complete...");
+      }
+    }
   }
   await saveSession(await page.cookies());
   console.log("[ws] Login successful.");
@@ -649,7 +674,7 @@ export class WsCollector {
 
     console.log("[ws] Connecting to:", wsUrl.slice(0, 60));
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       this.ws = new WebSocket(wsUrl, {
         headers: {
           "origin": BASE_URL,

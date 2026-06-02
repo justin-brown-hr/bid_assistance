@@ -4,6 +4,7 @@ import { WsCollector } from "./collect/wsCollector.js";
 import { fastDecision } from "./fastFilter.js";
 import { SeenStore } from "./store/seenStore.js";
 import { TelegramClient } from "./notify/telegram.js";
+import { DashboardServer } from "./dashboardServer.js";
 import type { Project } from "./types.js";
 
 function esc(s: string) {
@@ -72,107 +73,14 @@ export async function startMonitor() {
   store.pruneOlderThan(1000 * 60 * 60 * 24 * 7);
   await store.flush();
 
-  const tg = new TelegramClient({
-    token: cfg.telegram.token!,
-    chatId: cfg.telegram.chatId!,
-  });
+  const dashboard = cfg.dashboard.enabled
+    ? new DashboardServer({ port: cfg.dashboard.port, maxItems: cfg.dashboard.maxItems })
+    : null;
+  dashboard?.start();
 
-  // Map project id → description for callback lookups
-  const descriptionMap = new Map<string, string>();
-  // Map project id → sent description message id (for toggle delete)
-  const descMsgIdMap = new Map<string, number>();
-
-  // Start polling for "📋 Description" / "🙈 Hide" button taps
-  tg.startPolling(async (data, chatId, queryId, notifMsgId) => {
-    await tg.answerCallbackQuery(queryId);
-
-    if (data.startsWith("show:")) {
-      const projectId = data.slice(5);
-      const desc = descriptionMap.get(projectId);
-      if (!desc) {
-        await tg.sendToChat(chatId, "Description not available.");
-        return;
-      }
-      // Send description message and track it
-      const msgId = await tg.sendToChatWithId(chatId, `<code>${esc(desc)}</code>`);
-      if (msgId) {
-        descMsgIdMap.set(projectId, msgId);
-        trackMessage(msgId);
-      }
-      // Swap button to "🙈 Hide"
-      await tg.editMessageReplyMarkup(chatId, notifMsgId, [[
-        { text: "🙈 Hide", callback_data: `hide:${projectId}` },
-      ]]);
-
-    } else if (data.startsWith("hide:")) {
-      const projectId = data.slice(5);
-      const descMsgId = descMsgIdMap.get(projectId);
-      if (descMsgId) {
-        await tg.deleteMessage(descMsgId, chatId);
-        descMsgIdMap.delete(projectId);
-        // Remove from tracking so it doesn't count toward the limit
-        const idx = sentMessageIds.indexOf(descMsgId);
-        if (idx !== -1) sentMessageIds.splice(idx, 1);
-      }
-      // Swap button back to "📋 Description"
-      await tg.editMessageReplyMarkup(chatId, notifMsgId, [[
-        { text: "📋 Description", callback_data: `show:${projectId}` },
-      ]]);
-    }
-  });
-
-  // Track sent message IDs in the primary chat — auto-delete oldest when count exceeds MAX_MESSAGES
-  const MAX_MESSAGES = 50;
-  const sentMessageIds: number[] = [];
-
-  // Helper: push a message id and trim oldest if over limit
-  function trackMessage(msgId: number): void {
-    sentMessageIds.push(msgId);
-    if (sentMessageIds.length > MAX_MESSAGES) {
-      const oldId = sentMessageIds.shift()!;
-      void tg.deleteMessage(oldId).catch(() => {});
-      console.log(`[monitor] Auto-deleted old message ${oldId} (limit: ${MAX_MESSAGES})`);
-    }
-  }
-
-  // Daily counters
-  let dailyTotal = 0;
-  let dailyCool = 0;
-  let dailyRecruiter = 0;
-
-  // Schedule daily report at 1:00 PM PST = 21:00 UTC
-  function scheduleDailyReport() {
-    const now = new Date();
-    const next = new Date();
-    // Set to next 21:00 UTC
-    next.setUTCHours(21, 0, 0, 0);
-    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-    const msUntil = next.getTime() - now.getTime();
-    console.log(`[monitor] Daily report scheduled in ${Math.round(msUntil / 60000)} minutes (1:00 PM PST).`);
-    setTimeout(async () => {
-      const report = [
-        `🌗 <b>Daily Report</b>`,
-        ``,
-        `📁 Total projects: <b>${dailyTotal}</b>`,
-        `🎅 Cool projects: <b>${dailyCool}</b>`,
-        `(P) Recruiter projects: <b>${dailyRecruiter}</b>`,
-        ``,
-        `It was a great day, Let's go to Bed! 😴😴😴`,
-      ].join("\n");
-      try {
-        await tg.sendMessage(report);
-        console.log(`[monitor] Daily report sent: total=${dailyTotal} cool=${dailyCool} recruiter=${dailyRecruiter}`);
-      } catch (e) {
-        console.error("[monitor] Daily report failed:", e);
-      }
-      dailyTotal = 0;
-      dailyCool = 0;
-      dailyRecruiter = 0;
-      scheduleDailyReport();
-    }, msUntil);
-  }
-
-  scheduleDailyReport();
+  const tg = cfg.telegram.enabled
+    ? new TelegramClient({ token: cfg.telegram.token!, chatId: cfg.telegram.chatId! })
+    : null;
 
   // Merge all jobIds and languages from all search URLs
   const allJobIds = new Set<number>();
@@ -196,34 +104,23 @@ export async function startMonitor() {
     await store.flush();
 
     const decision = fastDecision(p, cfg.rules);
+    dashboard?.record({
+      foundAt: Date.now(),
+      project: p,
+      decision,
+      notified: false,
+    });
+
     if (!decision.ok) {
-      console.log(`[monitor] Filtered: ${p.title.slice(0, 40)} — ${decision.reasons.join(", ")}`);
-      return;
+      console.log(`[monitor] Filtered (UI only): ${p.title.slice(0, 40)} — ${decision.reasons.join(", ")}`);
     }
+    if (!tg) return;
 
-    // Count for daily report
-    dailyTotal++;
-    if (p.scoreText?.includes("🎅")) dailyCool++;
-    if (p.recruiter) dailyRecruiter++;
-
-    // Send immediately — WebSocket already includes full client data
+    // Send immediately
     const instantText = formatInstant(p, decision.reasons);
-    let messageId: number | undefined;
     try {
-      // Store description for button callback (keyed by project id)
-      if (p.description) {
-        descriptionMap.set(p.id, p.description);
-        // Keep map from growing unbounded — drop oldest entries beyond 200
-        if (descriptionMap.size > 200) {
-          const firstKey = descriptionMap.keys().next().value;
-          if (firstKey !== undefined) descriptionMap.delete(firstKey);
-        }
-      }
-
-      messageId = p.description
-        ? await tg.sendMessageWithButton(instantText, p.id)
-        : await tg.sendMessage(instantText);
-      trackMessage(messageId);
+      await tg.sendMessage(instantText);
+      dashboard?.markNotified(p.id);
     } catch (e) {
       console.error("[telegram] send failed", e);
       return;
@@ -234,20 +131,20 @@ export async function startMonitor() {
 
   collector.onWsDisconnect((code: number) => {
     const text = `⚠️ <b>WebSocket Disconnected</b>\nCode: ${code}\nReconnecting automatically...`;
-    void tg.sendMessage(text).catch(() => {});
+    void tg?.sendMessage(text).catch(() => {});
   });
   await collector.init();
   console.log("[monitor] Real-time WebSocket monitor running. Waiting for new projects...");
 
   process.on("uncaughtException", (err) => {
     console.error("[error] Uncaught Exception:", err);
-    void tg.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Uncaught Exception\n<b>Error:</b> ${esc(String(err instanceof Error ? err.message : err))}`).catch(() => {});
+    void tg?.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Uncaught Exception\n<b>Error:</b> ${esc(String(err instanceof Error ? err.message : err))}`).catch(() => {});
     // Don't exit — let PM2 handle restarts only for truly fatal errors
   });
 
   process.on("unhandledRejection", (reason) => {
     console.error("[error] Unhandled Rejection:", reason);
-    void tg.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Unhandled Rejection\n<b>Error:</b> ${esc(String(reason instanceof Error ? reason.message : reason))}`).catch(() => {});
+    void tg?.sendMessage(`🚨 <b>Bot Error</b>\n\n<b>Context:</b> Unhandled Rejection\n<b>Error:</b> ${esc(String(reason instanceof Error ? reason.message : reason))}`).catch(() => {});
     // Don't exit
   });
 

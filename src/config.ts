@@ -19,13 +19,6 @@ if (envRes.error) {
   console.error(`[env] failed to load ${envPath}: ${envRes.error.message}`);
 }
 
-function getEnv(name: string, fallback?: string): string {
-  const v = process.env[name];
-  if (v && v.trim().length > 0) return v.trim();
-  if (fallback !== undefined) return fallback;
-  throw new Error(`Missing required env var: ${name}`);
-}
-
 function getEnvOptional(name: string): string | undefined {
   const v = process.env[name];
   if (!v) return undefined;
@@ -55,6 +48,7 @@ function parseUrls(v: string | undefined): string[] {
 
 export const cfg = {
   telegram: {
+    enabled: (getEnvOptional("TELEGRAM_ENABLED") ?? "true").toLowerCase() !== "false",
     token: getEnvOptional("TELEGRAM_BOT_TOKEN"),
     chatId: getEnvOptional("TELEGRAM_CHAT_ID"),
   },
@@ -74,6 +68,14 @@ export const cfg = {
     ),
   },
   pollIntervalMs: Number(getEnvOptional("POLL_INTERVAL_MS") ?? "5000"),
+  dashboard: {
+    enabled: (getEnvOptional("DASHBOARD_ENABLED") ?? "true").toLowerCase() !== "false",
+    port: Number(getEnvOptional("DASHBOARD_PORT") ?? "3030"),
+    bindInfo: getEnvOptional("DASHBOARD_BIND_INFO"),
+    maxItems: Number(getEnvOptional("DASHBOARD_MAX_ITEMS") ?? "50"),
+    sqlitePath: getEnvOptional("DASHBOARD_SQLITE_PATH") ?? path.join("data", "dashboard.sqlite"),
+    authSecret: getEnvOptional("DASHBOARD_AUTH_SECRET") ?? "dev-secret-change-me",
+  },
   ai: {
     openaiApiKey: getEnvOptional("OPENAI_API_KEY"),
     model: getEnvOptional("OPENAI_MODEL") ?? "gpt-4.1-mini",
@@ -86,7 +88,7 @@ export function assertStartupConfig() {
       "FREELANCER_SEARCH_URLS must be set (comma-separated URLs).",
     );
   }
-  if (!cfg.telegram.token || !cfg.telegram.chatId) {
+  if (cfg.telegram.enabled && (!cfg.telegram.token || !cfg.telegram.chatId)) {
     throw new Error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.");
   }
   if (!cfg.freelancer.email || !cfg.freelancer.password) {
