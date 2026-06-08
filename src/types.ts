@@ -9,10 +9,14 @@ export type Project = {
   description?: string;
   skills: string[];
   budgetText?: string;
+  currencyCode?: string;
   postedAtText?: string;
   clientName?: string;
   clientCountry?: string;
   clientVerificationText?: string;
+  clientReviewText?: string;
+  clientReviewRating?: number;
+  clientReviewCount?: number;
   completionRateText?: string;
   proposalsText?: string;
   scoreText?: string;

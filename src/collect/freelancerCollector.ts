@@ -2,6 +2,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Project } from "../types.js";
+import { formatClientReview } from "./wsCollector.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,6 +63,9 @@ type ApiProjectsResponse = {
 type ScrapedEmployer = {
   country: string | null;
   username: string | null;
+  review_rating: number | null;
+  review_count: number | null;
+  no_reviews: boolean;
   identity_verified: boolean;
   payment_verified: boolean;
   deposit_made: boolean;
@@ -87,11 +91,16 @@ function formatBudget(p: ApiProject): string | undefined {
   const b = p.budget;
   const c = p.currency;
   if (!b) return undefined;
-  const sign = c?.sign ?? c?.code ?? "$";
-  if (b.minimum != null && b.maximum != null) return `${sign}${b.minimum} – ${sign}${b.maximum}`;
-  if (b.minimum != null) return `${sign}${b.minimum}+`;
-  if (b.maximum != null) return `up to ${sign}${b.maximum}`;
+  const sign = c?.sign ?? "$";
+  const fmt = (n: number) => n.toLocaleString("en-US");
+  if (b.minimum != null && b.maximum != null) return `${sign}${fmt(b.minimum)} – ${fmt(b.maximum)}`;
+  if (b.minimum != null) return `${sign}${fmt(b.minimum)}+`;
+  if (b.maximum != null) return `up to ${sign}${fmt(b.maximum)}`;
   return undefined;
+}
+
+function currencyCodeFromProject(p: ApiProject): string {
+  return (p.currency?.code ?? "USD").toUpperCase();
 }
 
 function formatVerification(s: ScrapedEmployer): string {
@@ -187,9 +196,36 @@ const SCRAPER_FN = `
     }
   }
 
+  var reviewRating = null;
+  var reviewCount = null;
+  var noReviews = /no reviews yet/i.test(area);
+  if (!noReviews) {
+    var reviewLines = area.split('\\n');
+    for (var ri = 0; ri < reviewLines.length; ri++) {
+      var rl = reviewLines[ri].trim();
+      var rcLine = rl.match(/^(\\d+)\\s+reviews?$/i);
+      if (rcLine) reviewCount = parseInt(rcLine[1], 10);
+      var rrLine = rl.match(/^([0-5]\\.\\d)$/);
+      if (rrLine) reviewRating = parseFloat(rrLine[1]);
+      var rbLine = rl.match(/based on\\s+(\\d+)\\s+reviews?/i);
+      if (rbLine) reviewCount = parseInt(rbLine[1], 10);
+    }
+    if (reviewRating == null) {
+      var floatM = area.match(/\\b([0-5]\\.\\d)\\b/);
+      if (floatM) reviewRating = parseFloat(floatM[1]);
+    }
+    if (reviewCount == null) {
+      var cm = area.match(/(\\d+)\\s+reviews?/i);
+      if (cm) reviewCount = parseInt(cm[1], 10);
+    }
+  }
+
   return {
     country: country,
     username: username,
+    review_rating: reviewRating,
+    review_count: reviewCount,
+    no_reviews: noReviews,
     identity_verified: area.indexOf('Identity verified') >= 0,
     payment_verified: area.indexOf('Payment verified') >= 0,
     deposit_made: area.indexOf('Deposit made') >= 0,
@@ -394,6 +430,7 @@ export class FreelancerCollector {
         description: p.description,
         skills: (p.jobs ?? []).map(j => j.name).filter(Boolean),
         budgetText: formatBudget(p),
+        currencyCode: currencyCodeFromProject(p),
         postedAtText: p.time_submitted
           ? new Date(p.time_submitted * 1000).toISOString()
           : undefined,
@@ -431,7 +468,12 @@ export class FreelancerCollector {
       clientName: scraped.username ?? undefined,
       clientCountry: scraped.country ?? undefined,
       clientVerificationText: formatVerification(scraped),
-      completionRateText: undefined, // not available from DOM scrape
+      clientReviewText: scraped.no_reviews
+        ? formatClientReview(undefined, 0)
+        : formatClientReview(scraped.review_rating ?? undefined, scraped.review_count ?? undefined),
+      clientReviewRating: scraped.no_reviews ? 0 : (scraped.review_rating ?? 0),
+      clientReviewCount: scraped.no_reviews ? 0 : (scraped.review_count ?? 0),
+      completionRateText: undefined,
     };
   }
 

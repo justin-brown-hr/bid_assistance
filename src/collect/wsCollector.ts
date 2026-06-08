@@ -93,11 +93,19 @@ async function saveSession(cookies: SavedCookie[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function formatBudget(d: WsProjectData): string | undefined {
-  const sign = d.currency?.sign ?? d.currencyCode ?? "$";
+  const sign = d.currency?.sign ?? "$";
+  const fmt = (n: number) => n.toLocaleString("en-US");
   const type = d.projIsHourly ? "Hourly" : "Fixed";
-  if (d.minbudget != null && d.maxbudget != null) return `${type} ${sign}${d.minbudget}–${sign}${d.maxbudget}`;
-  if (d.minbudget != null) return `${type} ${sign}${d.minbudget}+`;
+  if (d.minbudget != null && d.maxbudget != null) {
+    return `${type} ${sign}${fmt(d.minbudget)} – ${fmt(d.maxbudget)}`;
+  }
+  if (d.minbudget != null) return `${type} ${sign}${fmt(d.minbudget)}+`;
   return undefined;
+}
+
+function currencyCodeFrom(d: WsProjectData): string {
+  const raw = d.currency?.code ?? d.currencyCode ?? "USD";
+  return String(raw).toUpperCase();
 }
 
 function formatVerification(s: WsProjectData["client_status"]): string | undefined {
@@ -273,7 +281,34 @@ function countryFromData(d: WsProjectData): string | undefined {
   return `🌍 ${code}`;
 }
 
-function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: number, joinDate?: string): Project {
+export type UserInfo = {
+  countryCode?: string;
+  complete?: number;
+  incomplete?: number;
+  joinDate?: string;
+  reviewCount?: number;
+  reviewOverall?: number;
+};
+
+function normalizeRating(raw?: number): number | undefined {
+  if (raw == null || raw <= 0) return undefined;
+  if (raw > 0 && raw <= 1) return raw * 5;
+  if (raw > 5 && raw <= 100) return (raw / 100) * 5;
+  return raw;
+}
+
+export function formatClientReview(overall?: number, reviewCount?: number): string {
+  const rating = normalizeRating(overall);
+  const reviews = reviewCount ?? 0;
+  if (rating == null && reviews === 0) return "No reviews yet";
+  if (rating != null && reviews > 0) {
+    return `${rating.toFixed(1)} ★ · ${reviews} review${reviews === 1 ? "" : "s"}`;
+  }
+  if (reviews > 0) return `${reviews} review${reviews === 1 ? "" : "s"}`;
+  return `${rating!.toFixed(1)} ★`;
+}
+
+function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
   const seoUrl = String(d.seo_url);
   const url = seoUrl.startsWith("http")
     ? seoUrl
@@ -289,6 +324,12 @@ function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: numbe
   const country = countryFromData(d);
   const { score, cool } = scoreProject(d);
   const scoreText = `${cool ? "🎅" : "😎"} ${score}/70`;
+
+  const complete = userInfo?.complete;
+  const incomplete = userInfo?.incomplete;
+  const joinDate = userInfo?.joinDate;
+  const reviewCount = userInfo?.reviewCount ?? d.reviews;
+  const reviewOverall = userInfo?.reviewOverall ?? d.overallReputation;
 
   // Completion rate: complete / (complete + incomplete) from users API
   let completionRateText: string;
@@ -310,12 +351,16 @@ function wsDataToProject(d: WsProjectData, complete?: number, incomplete?: numbe
     description: d.appended_descr,
     skills,
     budgetText: formatBudget(d),
+    currencyCode: currencyCodeFrom(d),
     postedAtText: d.time_submitted
       ? new Date(d.time_submitted * 1000).toISOString()
       : undefined,
     clientName: d.userName,
     clientCountry: country,
     clientVerificationText: formatVerification(d.client_status),
+    clientReviewText: formatClientReview(reviewOverall, reviewCount),
+    clientReviewRating: normalizeRating(reviewOverall) ?? 0,
+    clientReviewCount: reviewCount ?? 0,
     completionRateText,
     proposalsText: bidCount,
     scoreText,
@@ -477,7 +522,7 @@ function setSessionCookies(cookies: SavedCookie[]): void {
     .join("; ");
 }
 
-async function fetchUserCountry(userId: number): Promise<{ countryCode?: string; complete?: number; incomplete?: number; joinDate?: string } | undefined> {
+async function fetchUserInfo(userId: number): Promise<UserInfo | undefined> {
   if (!userId || !_sessionCookieHeader) return undefined;
   try {
     const url = `${BASE_URL}/api/users/0.1/users/?users[]=${userId}&user_details=true&user_location_details=true&user_employer_reputation=true&compact=true`;
@@ -492,7 +537,15 @@ async function fetchUserCountry(userId: number): Promise<{ countryCode?: string;
       status: string;
       result?: { users?: Record<string, {
         location?: { country?: { code?: string; name?: string } };
-        employer_reputation?: { entire_history?: { complete?: number; incomplete?: number } };
+        employer_reputation?: {
+          entire_history?: {
+            complete?: number;
+            incomplete?: number;
+            reviews?: number;
+            overall?: number;
+            positive?: number;
+          };
+        };
         registration_date?: number;
       }> };
     };
@@ -502,18 +555,26 @@ async function fetchUserCountry(userId: number): Promise<{ countryCode?: string;
       ?? countryNameToCode(user?.location?.country?.name ?? "");
     const hist = user?.employer_reputation?.entire_history;
 
-    // Format join date as "Mon DD YYYY"
     let joinDate: string | undefined;
     if (user?.registration_date) {
       const d = new Date(user.registration_date * 1000);
       joinDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     }
 
+    const reviewCount = typeof hist?.reviews === "number" ? hist.reviews : undefined;
+    const reviewOverall = typeof hist?.overall === "number"
+      ? hist.overall
+      : typeof hist?.positive === "number"
+        ? hist.positive
+        : undefined;
+
     return {
       countryCode: code,
       complete: hist?.complete,
       incomplete: hist?.incomplete,
       joinDate,
+      reviewCount,
+      reviewOverall,
     };
   } catch {
     return undefined;
@@ -783,7 +844,7 @@ export class WsCollector {
       this.seenIds.add(id);
 
       // Fetch accurate client country + reputation from users API (~200ms, single call)
-      const userInfo = data.userId ? await fetchUserCountry(data.userId) : undefined;
+      const userInfo = data.userId ? await fetchUserInfo(data.userId) : undefined;
       const realCountryCode = userInfo?.countryCode;
 
       // Override currency.country with real country code
@@ -804,7 +865,7 @@ export class WsCollector {
         return;
       }
 
-      const project = wsDataToProject(data, userInfo?.complete, userInfo?.incomplete, userInfo?.joinDate);
+      const project = wsDataToProject(data, userInfo);
       console.log(`[ws] 🆕 ${project.title.slice(0, 40)} | ${data.userName} | real_country=${realCountryCode ?? "?"} | shown=${project.clientCountry ?? "NONE"}`);
 
       if (this.onProject) {

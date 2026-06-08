@@ -293,5 +293,45 @@ export class DashboardDbSqlite {
     const styleId = styleIdRaw.trim();
     this.db.prepare("DELETE FROM styles WHERE username = ? AND style_id = ?").run(username, styleId);
   }
+
+  listUsers(): Array<{
+    username: string;
+    createdAt: number;
+    hasOpenaiKey: boolean;
+    styleCount: number;
+  }> {
+    if (!this.db) throw new Error("DB not connected");
+    const rows = this.db.prepare(`
+      SELECT
+        u.username,
+        u.created_at AS created_at,
+        EXISTS(SELECT 1 FROM secrets s WHERE s.username = u.username) AS has_openai_key,
+        (SELECT COUNT(*) FROM styles st WHERE st.username = u.username) AS style_count
+      FROM users u
+      ORDER BY u.created_at ASC
+    `).all() as Array<{
+      username: string;
+      created_at: number;
+      has_openai_key: number;
+      style_count: number;
+    }>;
+
+    return rows.map((r) => ({
+      username: r.username,
+      createdAt: r.created_at,
+      hasOpenaiKey: Boolean(r.has_openai_key),
+      styleCount: Number(r.style_count) || 0,
+    }));
+  }
+
+  deleteUser(usernameRaw: string): void {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    if (!username) throw new Error("Username required");
+    if (username === "riora") throw new Error("Cannot delete admin account");
+
+    const r = this.db.prepare("DELETE FROM users WHERE username = ?").run(username);
+    if (r.changes === 0) throw new Error("User not found");
+  }
 }
 
