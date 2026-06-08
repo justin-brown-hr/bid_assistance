@@ -1468,21 +1468,23 @@ export class DashboardServer {
       .listRow:last-child { border-bottom: none; }
       .listRow:hover { background: var(--btnHover); }
       .listRowActive { background: var(--btnHover); outline: none; box-shadow: inset 3px 0 0 var(--link); }
-      @keyframes writeBidFlash {
+      @keyframes listRowNewPulse {
         0%, 100% {
-          background-color: #22c55e !important;
-          border-color: #16a34a !important;
-          color: #fff !important;
-          box-shadow: 0 0 16px rgba(34, 197, 94, 0.55) !important;
+          box-shadow: inset 0 0 0 3px #22c55e, 0 0 14px rgba(34, 197, 94, 0.45);
+          background: rgba(34, 197, 94, 0.1);
         }
         50% {
-          background-color: var(--accent) !important;
-          border-color: var(--accent) !important;
-          box-shadow: none !important;
+          box-shadow: inset 0 0 0 3px #16a34a, 0 0 0 rgba(34, 197, 94, 0);
+          background: var(--card);
         }
       }
-      .btnPrimary.writeBidHighlight {
-        animation: writeBidFlash 0.75s ease-in-out infinite;
+      .listRow.listRowNew {
+        animation: listRowNewPulse 1s ease-in-out infinite;
+        position: relative;
+        z-index: 1;
+      }
+      .listRow.listRowNew.listRowActive {
+        box-shadow: inset 3px 0 0 var(--link), inset 0 0 0 3px #22c55e;
       }
       .listRowTop { display:flex; gap:14px; justify-content:space-between; align-items:flex-start; }
       .listRowMain { min-width:0; flex: 1; }

@@ -19,7 +19,6 @@
   let selectedProjectId = "";
   let eventSource = null;
   let feedReady = false;
-
   function toast(msg) {
     if (!toastEl) return;
     toastEl.textContent = msg;
@@ -77,18 +76,20 @@
   }
   updateThemeFabIcon();
 
-  function stopWriteBidHighlight(itemId) {
+  function clearNewHighlight(itemId) {
     const t = highlightTimers.get(itemId);
     if (t) clearTimeout(t);
     highlightTimers.delete(itemId);
-    newProjectHighlights.delete(itemId);
+    if (!newProjectHighlights.delete(itemId)) return;
+    refreshListIfOnApp();
   }
 
-  function focusNewProject(itemId) {
-    stopWriteBidHighlight(itemId);
+  function highlightNewProject(itemId) {
+    const t = highlightTimers.get(itemId);
+    if (t) clearTimeout(t);
+    highlightTimers.delete(itemId);
     newProjectHighlights.add(itemId);
     refreshListIfOnApp();
-    toast("New project");
 
     if (route() === "/app") {
       requestAnimationFrame(() => {
@@ -97,15 +98,14 @@
       });
     }
 
-    const t = setTimeout(() => {
-      stopWriteBidHighlight(itemId);
-      refreshListIfOnApp();
-    }, NEW_HIGHLIGHT_MS);
-    highlightTimers.set(itemId, t);
+    highlightTimers.set(
+      itemId,
+      setTimeout(() => clearNewHighlight(itemId), NEW_HIGHLIGHT_MS),
+    );
   }
 
   function clearNewHighlights() {
-    for (const id of [...highlightTimers.keys()]) stopWriteBidHighlight(id);
+    for (const id of [...highlightTimers.keys()]) clearNewHighlight(id);
     newProjectHighlights.clear();
   }
 
@@ -129,7 +129,7 @@
       selectedProjectId = msg.item.id;
     }
     if (isNewProject) {
-      focusNewProject(msg.item.id);
+      highlightNewProject(msg.item.id);
     } else {
       refreshListIfOnApp();
     }
@@ -945,7 +945,7 @@
     const verifHtml = renderVerifIcons(p.clientVerificationText);
     const isNewHighlight = newProjectHighlights.has(item.id);
     return `
-      <div class="listRow ${isSelected ? "listRowActive" : ""}" data-id="${esc(item.id)}" role="button" tabindex="0">
+      <div class="listRow${isSelected ? " listRowActive" : ""}${isNewHighlight ? " listRowNew" : ""}" data-id="${esc(item.id)}" role="button" tabindex="0">
         <div class="listRowTop">
           <div class="listRowMain">
             <button type="button" class="listRowTitleLink" data-action="copy-url" data-id="${esc(item.id)}" title="Click to copy URL">${title}</button>
@@ -960,7 +960,7 @@
             ${renderClientReview(p)}
           </div>
           <div class="listRowActions">
-            <button class="btnPrimary${isNewHighlight ? " writeBidHighlight" : ""}" type="button" data-action="write-bid" data-id="${esc(item.id)}">Write bid</button>
+            <button class="btnPrimary" type="button" data-action="write-bid" data-id="${esc(item.id)}">Write bid</button>
             <div class="listRowStats">
               ${renderProgBar("Cool", cool)}
               ${renderProgBar("Rate", rate)}
@@ -1054,6 +1054,7 @@
         const id = actionEl.getAttribute("data-id") || "";
         const item = state.get(id);
         if (!item) return;
+        if (newProjectHighlights.has(id)) clearNewHighlight(id);
         if (action === "copy-url") {
           e.preventDefault();
           e.stopPropagation();
@@ -1081,7 +1082,12 @@
 
       const row = e.target.closest && e.target.closest("div.listRow[data-id]");
       if (!row) return;
-      selectedProjectId = row.getAttribute("data-id") || "";
+      const rowId = row.getAttribute("data-id") || "";
+      selectedProjectId = rowId;
+      if (newProjectHighlights.has(rowId)) {
+        clearNewHighlight(rowId);
+        return;
+      }
       rerenderList();
     });
 
