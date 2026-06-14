@@ -1183,7 +1183,8 @@
     return `<div class="clientDateRow"><span class="clientDateLabel muted">${esc(label)}</span>${valHtml}</div>`;
   }
 
-  function renderClientProfilePanel(p) {
+  function renderClientProfilePanel(p, opts) {
+    const linkName = opts?.linkName !== false;
     const name = esc(p.name || p.username || "Unknown");
     const username = esc(p.username || "");
     const title = p.profileTitle ? esc(p.profileTitle) : "";
@@ -1200,14 +1201,15 @@
     const avatar = p.avatar
       ? `<img class="clientCardAvatar" src="${esc(p.avatar)}" alt="" loading="lazy" decoding="async" />`
       : `<div class="clientCardAvatar clientCardAvatarFallback">${esc((p.name || p.username || "?").slice(0, 1).toUpperCase())}</div>`;
+    const nameHtml = linkName && p.username
+      ? `<a class="clientCardName" href="${esc(profileUrl)}" target="_blank" rel="noopener">${name}</a>`
+      : `<div class="clientCardName">${name}</div>`;
 
     return `
       <div class="clientCardTop">
         ${avatar}
         <div class="clientCardMain">
-          ${p.username
-            ? `<a class="clientCardName" href="${esc(profileUrl)}" target="_blank" rel="noopener">${name}</a>`
-            : `<div class="clientCardName">${name}</div>`}
+          ${nameHtml}
           ${username ? `<div class="clientCardUsername">@${username}</div>` : ""}
           ${title ? `<div class="clientCardTitle">${title}</div>` : ""}
         </div>
@@ -1299,7 +1301,7 @@
     try {
       const j = await api("/api/client-profiles/" + encodeURIComponent(slug));
       if (bodyEl) {
-        bodyEl.innerHTML = `<div class="clientCard clientCardModal">${renderClientProfilePanel(j.profile || {})}</div>`;
+        bodyEl.innerHTML = `<div class="clientCard clientCardModal">${renderClientProfilePanel(j.profile || {}, { linkName: false })}</div>`;
         bodyEl.classList.remove("muted");
       }
     } catch {
