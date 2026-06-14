@@ -65,6 +65,18 @@ function parseSearchUrl(input: string): { jobIds: number[]; languages: string[] 
   }
 }
 
+function clientCountryNameForProfile(project: Project): string | undefined {
+  const raw = project.clientCountry?.trim();
+  if (raw) {
+    const name = raw
+      .replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "")
+      .replace(/^🌍\s*/, "")
+      .trim();
+    if (name && !/^[A-Za-z]{2}$/.test(name)) return name;
+  }
+  return project.clientCountryCode;
+}
+
 export async function startMonitor() {
   assertStartupConfig();
 
@@ -110,6 +122,17 @@ export async function startMonitor() {
       decision,
       notified: false,
     });
+
+    if (p.clientUsername) {
+      dashboard?.requestClientProfileScrape({
+        username: p.clientUsername,
+        projectUrl: p.url,
+        country: clientCountryNameForProfile(p),
+        joinDate: p.joinDate,
+        verification: p.clientVerificationText,
+        postedAt: Date.now(),
+      });
+    }
 
     if (!decision.ok) {
       console.log(`[monitor] Filtered (UI only): ${p.title.slice(0, 40)} — ${decision.reasons.join(", ")}`);

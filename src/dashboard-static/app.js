@@ -3,6 +3,7 @@
   const toastEl = document.getElementById("toast");
   const themeBtn = document.getElementById("themeBtn");
   const headerSessionEl = document.getElementById("headerSession");
+  const headerNavEl = document.getElementById("headerNav");
 
   const THEME_KEY = "fh_theme";
   const NEW_HIGHLIGHT_MS = 10000;
@@ -187,9 +188,25 @@
   }
 
   function clearHeaderSession() {
-    if (!headerSessionEl) return;
-    headerSessionEl.classList.add("hidden");
-    headerSessionEl.innerHTML = "";
+    if (headerSessionEl) {
+      headerSessionEl.classList.add("hidden");
+      headerSessionEl.innerHTML = "";
+    }
+    headerNavEl?.classList.add("hidden");
+  }
+
+  function updateHeaderNav() {
+    if (!headerNavEl || !me) return;
+    headerNavEl.classList.remove("hidden");
+    const r = route();
+    const projectsLink = document.getElementById("headerProjectsLink");
+    const clientsLink = document.getElementById("headerClientsLink");
+    projectsLink?.classList.toggle("headerNavLinkActive", r === "/app");
+    if (clientsLink) {
+      const showClients = isAdminUser();
+      clientsLink.classList.toggle("hidden", !showClients);
+      clientsLink.classList.toggle("headerNavLinkActive", showClients && r === "/clients");
+    }
   }
 
   function userIconSvg() {
@@ -210,6 +227,14 @@
     return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <path d="M12 3l7 3v5c0 4.418-3.134 8.168-7 9-3.866-.832-7-4.582-7-9V6l7-3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
       <path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
+  }
+
+  function clientsIconSvg() {
+    return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="9" cy="7" r="4" stroke="currentColor" stroke-width="1.8"/>
+      <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
     </svg>`;
   }
 
@@ -246,6 +271,7 @@
         <div class="headerUserName">${esc(me)}</div>
       </div>
     `;
+    updateHeaderNav();
     document.getElementById("headerAdminBtn")?.addEventListener("click", () => nav("/admin"));
     document.getElementById("headerUserBtn")?.addEventListener("click", () => nav("/profile"));
     document.getElementById("headerLogoutBtn")?.addEventListener("click", () => void doLogout());
@@ -266,6 +292,11 @@
   }
   function render(html) {
     if (root) root.innerHTML = html;
+  }
+
+  function setMainLayout(mode) {
+    if (!root) return;
+    root.classList.toggle("mainClients", mode === "clients");
   }
 
   async function api(url, opts) {
@@ -299,6 +330,10 @@
 
   async function deleteAdminUser(username) {
     await api("/api/admin/users/" + encodeURIComponent(username), { method: "DELETE" });
+  }
+
+  async function deleteClientProfile(username) {
+    await api("/api/client-profiles/" + encodeURIComponent(username), { method: "DELETE" });
   }
 
   function formatDate(ms) {
@@ -463,9 +498,112 @@
     return String(j.bid || "");
   }
 
+  function styleNameTaken(name, excludeStyleId, styles) {
+    const n = String(name || "").trim().toLowerCase();
+    if (!n) return false;
+    return (styles || []).some(
+      (s) => s.name.trim().toLowerCase() === n && s.styleId !== excludeStyleId,
+    );
+  }
+
+  function openNewStyleModal() {
+    const existing = document.getElementById("newStyleModal");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "newStyleModal";
+    overlay.className = "modalOverlay";
+    overlay.innerHTML = `
+      <div class="modalCard" role="dialog" aria-labelledby="newStyleModalTitle">
+        <h3 id="newStyleModalTitle">New bid style</h3>
+        <div class="sub">Enter a unique name and style text.</div>
+        <div class="field">
+          <div class="label">Name</div>
+          <input id="modalStyleName" type="text" placeholder="e.g. Friendly short bid" />
+        </div>
+        <div class="field">
+          <div class="label">Text</div>
+          <textarea id="modalStyleText" class="profileStyleText" placeholder="Paste or write your bid style instructions…"></textarea>
+        </div>
+        <div class="modalActions">
+          <button id="modalCreateStyle" class="btnPrimary" type="button">Create</button>
+          <button id="modalCancelStyle" class="btn" type="button">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    document.getElementById("modalCancelStyle")?.addEventListener("click", close);
+
+    document.getElementById("modalCreateStyle")?.addEventListener("click", async () => {
+      const name = (document.getElementById("modalStyleName")?.value || "").trim();
+      const text = document.getElementById("modalStyleText")?.value || "";
+      const createBtn = document.getElementById("modalCreateStyle");
+
+      if (!name) {
+        alert("Style name is required.");
+        return;
+      }
+      if (!text.trim()) {
+        alert("Style text is required.");
+        return;
+      }
+      if (styleNameTaken(name, "", settings?.styles || [])) {
+        alert("A bid style with this name already exists. Choose a different name.");
+        return;
+      }
+
+      if (createBtn) {
+        createBtn.disabled = true;
+        createBtn.textContent = "Creating…";
+      }
+      try {
+        await api("/api/settings/styles", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, text }),
+        });
+        await loadSettings();
+        close();
+        alert("Bid style created.");
+        nav("/profile");
+      } catch (e) {
+        alert("Error: " + (e?.message || String(e)));
+        if (createBtn) {
+          createBtn.disabled = false;
+          createBtn.textContent = "Create";
+        }
+      }
+    });
+
+    document.getElementById("modalStyleName")?.focus();
+  }
+
+  function setAuthLoading(on, kind) {
+    const go = document.getElementById("go");
+    const u = document.getElementById("u");
+    const p = document.getElementById("p");
+    const swap = document.getElementById("swap");
+    const label = kind === "signup" ? "Sign up" : "Sign in";
+    const loadingLabel = kind === "signup" ? "Signing up…" : "Signing in…";
+    if (go) {
+      go.disabled = on;
+      go.textContent = on ? loadingLabel : label;
+      go.classList.toggle("btnLoading", on);
+    }
+    if (u) u.disabled = on;
+    if (p) p.disabled = on;
+    if (swap) swap.disabled = on;
+  }
+
   function renderAuth(kind) {
     stopEventStream();
     clearHeaderSession();
+    setMainLayout("default");
     const title = kind === "signup" ? "Sign up" : "Sign in";
     const endpoint = kind === "signup" ? "/api/signup" : "/api/signin";
 
@@ -492,6 +630,14 @@
       const passcode = document.getElementById("p")?.value || "";
       const msg = document.getElementById("msg");
 
+      if (!username || !passcode) {
+        alert("Username and passcode are required.");
+        return;
+      }
+
+      setAuthLoading(true, kind);
+      if (msg) msg.textContent = "";
+
       try {
         await api(endpoint, {
           method: "POST",
@@ -503,7 +649,11 @@
         await bootstrapFeed();
         nav("/app");
       } catch (e) {
-        if (msg) msg.textContent = "Error: " + (e?.message || String(e));
+        const errMsg = e?.message || String(e);
+        alert("Error: " + errMsg);
+        if (msg) msg.textContent = "Error: " + errMsg;
+      } finally {
+        setAuthLoading(false, kind);
       }
     });
   }
@@ -513,6 +663,7 @@
       nav("/app");
       return;
     }
+    setMainLayout("default");
     updateHeaderSession();
     render(`
       <div class="adminPage">
@@ -527,6 +678,7 @@
   }
 
   function renderProfile() {
+    setMainLayout("default");
     updateHeaderSession();
     const styles = settings?.styles || [];
     const hasKey = settings?.hasOpenaiKey === true;
@@ -542,6 +694,15 @@
         </div>
 
         <div class="card" style="margin-top:12px;">
+          <div class="metaRow"><span><b>Change passcode</b></span></div>
+          <div class="field"><div class="label">Current passcode</div><input id="pwCur" type="password" autocomplete="current-password" /></div>
+          <div class="field"><div class="label">New passcode</div><input id="pwNew" type="password" autocomplete="new-password" /></div>
+          <div class="field"><div class="label">Confirm new passcode</div><input id="pwConfirm" type="password" autocomplete="new-password" /></div>
+          <div class="panelActions"><button id="savePw" class="btnPrimary" type="button">Change passcode</button></div>
+          <div id="pwmsg" class="resultMeta"></div>
+        </div>
+
+        <div class="card" style="margin-top:12px;">
           <div class="metaRow"><span><b>Bid styles</b></span></div>
           <div class="field">
             <div class="label">Select</div>
@@ -550,17 +711,62 @@
               ${styles.map((s) => `<option value="${esc(s.styleId)}">${esc(s.name)}</option>`).join("")}
             </select>
           </div>
-          <div class="field"><div class="label">Name</div><input id="sn" type="text" /></div>
-          <div class="field"><div class="label">Text</div><textarea id="st"></textarea></div>
+          <div class="field"><div class="label">Name</div><input id="sn" type="text" placeholder="Style name" /></div>
+          <div class="field"><div class="label">Text</div><textarea id="st" class="profileStyleText" placeholder="Bid style instructions…"></textarea></div>
           <div class="panelActions">
             <button id="newS" class="btn" type="button">New</button>
-            <button id="saveS" class="btnPrimary" type="button">Save</button>
-            <button id="delS" class="btn" type="button">Delete</button>
+            <button id="saveS" class="btnPrimary" type="button" disabled>Update</button>
+            <button id="delS" class="btn" type="button" disabled>Delete</button>
           </div>
           <div id="smsg" class="resultMeta"></div>
         </div>
       </div>
     `);
+
+    document.getElementById("savePw")?.addEventListener("click", async () => {
+      const currentPasscode = document.getElementById("pwCur")?.value || "";
+      const newPasscode = document.getElementById("pwNew")?.value || "";
+      const confirmPasscode = document.getElementById("pwConfirm")?.value || "";
+      const pwmsg = document.getElementById("pwmsg");
+      if (!currentPasscode || !newPasscode) {
+        alert("Current and new passcode are required.");
+        return;
+      }
+      if (newPasscode.length < 4) {
+        alert("New passcode must be at least 4 characters.");
+        return;
+      }
+      if (newPasscode !== confirmPasscode) {
+        alert("New passcode and confirmation do not match.");
+        return;
+      }
+      const saveBtn = document.getElementById("savePw");
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving…";
+      }
+      try {
+        await api("/api/settings/password", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ currentPasscode, newPasscode }),
+        });
+        document.getElementById("pwCur").value = "";
+        document.getElementById("pwNew").value = "";
+        document.getElementById("pwConfirm").value = "";
+        if (pwmsg) pwmsg.textContent = "Passcode updated.";
+        toast("Passcode updated");
+      } catch (e) {
+        const errMsg = e?.message || String(e);
+        alert("Error: " + errMsg);
+        if (pwmsg) pwmsg.textContent = "Error: " + errMsg;
+      } finally {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Change passcode";
+        }
+      }
+    });
 
     document.getElementById("saveKey")?.addEventListener("click", async () => {
       const openaiKey = document.getElementById("key")?.value || "";
@@ -587,15 +793,32 @@
           headerBtn.title = `OpenAI key ${ok ? "saved" : "not saved"} — Profile`;
         }
         if (kmsg) kmsg.textContent = "Saved.";
+        alert("OpenAI key saved.");
       } catch (e) {
-        if (kmsg) kmsg.textContent = "Error: " + (e?.message || String(e));
+        const errMsg = e?.message || String(e);
+        alert("Error: " + errMsg);
+        if (kmsg) kmsg.textContent = "Error: " + errMsg;
       }
     });
 
     let curStyleId = "";
+
+    function syncStyleActionButtons() {
+      const hasStyle = Boolean(curStyleId);
+      const updateBtn = document.getElementById("saveS");
+      const delBtn = document.getElementById("delS");
+      if (updateBtn) updateBtn.disabled = !hasStyle;
+      if (delBtn) delBtn.disabled = !hasStyle;
+    }
+
     document.getElementById("styleSel")?.addEventListener("change", async (ev) => {
       curStyleId = ev.target.value || "";
-      if (!curStyleId) return;
+      syncStyleActionButtons();
+      if (!curStyleId) {
+        document.getElementById("sn").value = "";
+        document.getElementById("st").value = "";
+        return;
+      }
       const smsg = document.getElementById("smsg");
       try {
         const j = await api("/api/settings/styles/" + encodeURIComponent(curStyleId));
@@ -607,35 +830,519 @@
     });
 
     document.getElementById("newS")?.addEventListener("click", () => {
-      curStyleId = "";
-      document.getElementById("styleSel").value = "";
-      document.getElementById("sn").value = "";
-      document.getElementById("st").value = "";
+      openNewStyleModal();
     });
 
     document.getElementById("saveS")?.addEventListener("click", async () => {
-      const name = document.getElementById("sn")?.value || "";
+      if (!curStyleId) {
+        alert("Select a bid style to update, or click New to create one.");
+        return;
+      }
+      const name = (document.getElementById("sn")?.value || "").trim();
       const text = document.getElementById("st")?.value || "";
       const smsg = document.getElementById("smsg");
+      const updateBtn = document.getElementById("saveS");
+
+      if (!name) {
+        alert("Style name is required.");
+        return;
+      }
+      if (!text.trim()) {
+        alert("Style text is required.");
+        return;
+      }
+      if (styleNameTaken(name, curStyleId, settings?.styles || [])) {
+        alert("A bid style with this name already exists. Choose a different name.");
+        return;
+      }
+
+      if (updateBtn) {
+        updateBtn.disabled = true;
+        updateBtn.textContent = "Updating…";
+      }
       try {
         await api("/api/settings/styles", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ styleId: curStyleId || undefined, name, text }),
+          body: JSON.stringify({ styleId: curStyleId, name, text }),
         });
         await loadSettings();
+        alert("Bid style updated.");
         nav("/profile");
       } catch (e) {
-        if (smsg) smsg.textContent = "Error: " + (e?.message || String(e));
+        const errMsg = e?.message || String(e);
+        alert("Error: " + errMsg);
+        if (smsg) smsg.textContent = "Error: " + errMsg;
+      } finally {
+        if (updateBtn) {
+          updateBtn.disabled = !curStyleId;
+          updateBtn.textContent = "Update";
+        }
       }
     });
 
     document.getElementById("delS")?.addEventListener("click", async () => {
       if (!curStyleId) return;
-      await api("/api/settings/styles/" + encodeURIComponent(curStyleId), { method: "DELETE" });
-      await loadSettings();
-      nav("/profile");
+      if (!confirm("Delete this bid style?")) return;
+      try {
+        await api("/api/settings/styles/" + encodeURIComponent(curStyleId), { method: "DELETE" });
+        await loadSettings();
+        alert("Bid style deleted.");
+        nav("/profile");
+      } catch (e) {
+        alert("Error: " + (e?.message || String(e)));
+      }
     });
+
+    syncStyleActionButtons();
+  }
+
+  let clientsPage = 1;
+  const CLIENTS_PAGE_SIZE = 20;
+  let clientsFiltersOpen = false;
+
+  const CLIENTS_FILTER_DEFAULTS = {
+    q: "",
+    username: "",
+    name: "",
+    avatar: "",
+    profileTitle: "",
+    earning: "",
+    lastReviewDate: "",
+    country: "",
+    joinDate: "",
+    lastPostedProject: "",
+    reviewCountMin: "",
+    reviewCountMax: "",
+    reviewRateMin: "",
+    reviewRateMax: "",
+    lastPostedFrom: "",
+    lastPostedTo: "",
+    scrapedFrom: "",
+    scrapedTo: "",
+    createdFrom: "",
+    createdTo: "",
+    updatedFrom: "",
+    updatedTo: "",
+  };
+  let clientsFilters = { ...CLIENTS_FILTER_DEFAULTS };
+
+  function dateInputToMsStart(val) {
+    if (!val) return undefined;
+    const d = new Date(`${val}T00:00:00`);
+    return Number.isFinite(d.getTime()) ? d.getTime() : undefined;
+  }
+
+  function dateInputToMsEnd(val) {
+    if (!val) return undefined;
+    const d = new Date(`${val}T23:59:59`);
+    return Number.isFinite(d.getTime()) ? d.getTime() : undefined;
+  }
+
+  function buildClientsApiUrl(page) {
+    const p = new URLSearchParams();
+    p.set("page", String(page));
+    p.set("limit", String(CLIENTS_PAGE_SIZE));
+    const textKeys = [
+      "q", "username", "name", "avatar", "profileTitle", "earning",
+      "lastReviewDate", "country", "joinDate", "lastPostedProject",
+    ];
+    for (const k of textKeys) {
+      const v = String(clientsFilters[k] ?? "").trim();
+      if (v) p.set(k, v);
+    }
+    const numKeys = ["reviewCountMin", "reviewCountMax", "reviewRateMin", "reviewRateMax"];
+    for (const k of numKeys) {
+      const v = String(clientsFilters[k] ?? "").trim();
+      if (v) p.set(k, v);
+    }
+    const dateFields = [
+      ["lastPostedFrom", dateInputToMsStart],
+      ["lastPostedTo", dateInputToMsEnd],
+      ["scrapedFrom", dateInputToMsStart],
+      ["scrapedTo", dateInputToMsEnd],
+      ["createdFrom", dateInputToMsStart],
+      ["createdTo", dateInputToMsEnd],
+      ["updatedFrom", dateInputToMsStart],
+      ["updatedTo", dateInputToMsEnd],
+    ];
+    for (const [key, fn] of dateFields) {
+      const ms = fn(String(clientsFilters[key] ?? "").trim());
+      if (ms != null) p.set(key, String(ms));
+    }
+    return `/api/client-profiles?${p}`;
+  }
+
+  function readClientsFiltersFromDom() {
+    const get = (id) => document.getElementById(id)?.value ?? "";
+    clientsFilters = {
+      q: get("cf_q"),
+      username: get("cf_username"),
+      name: get("cf_name"),
+      avatar: get("cf_avatar"),
+      profileTitle: get("cf_profileTitle"),
+      earning: get("cf_earning"),
+      lastReviewDate: get("cf_lastReviewDate"),
+      country: get("cf_country"),
+      joinDate: get("cf_joinDate"),
+      lastPostedProject: get("cf_lastPostedProject"),
+      reviewCountMin: get("cf_reviewCountMin"),
+      reviewCountMax: get("cf_reviewCountMax"),
+      reviewRateMin: get("cf_reviewRateMin"),
+      reviewRateMax: get("cf_reviewRateMax"),
+      lastPostedFrom: get("cf_lastPostedFrom"),
+      lastPostedTo: get("cf_lastPostedTo"),
+      scrapedFrom: get("cf_scrapedFrom"),
+      scrapedTo: get("cf_scrapedTo"),
+      createdFrom: get("cf_createdFrom"),
+      createdTo: get("cf_createdTo"),
+      updatedFrom: get("cf_updatedFrom"),
+      updatedTo: get("cf_updatedTo"),
+    };
+  }
+
+  function clientsFilterField(id, label, type, placeholder) {
+    const val = esc(String(clientsFilters[id.replace("cf_", "")] ?? ""));
+    const inputType = type || "text";
+    return `
+      <div class="field">
+        <div class="label">${esc(label)}</div>
+        <input id="${id}" type="${inputType}" value="${val}" placeholder="${esc(placeholder || "")}" />
+      </div>
+    `;
+  }
+
+  function renderClientsToolbar() {
+    return `
+      <div class="clientsToolbar">
+        <div class="clientsSearchRow">
+          <input id="cf_q" type="search" value="${esc(clientsFilters.q)}" placeholder="Search all fields…" />
+          <button id="clientsSearchBtn" class="btnPrimary" type="button">Search</button>
+          <button id="clientsToggleFilters" class="btn" type="button">${clientsFiltersOpen ? "Hide filters" : "Show filters"}</button>
+        </div>
+        <div id="clientsFilterPanel" class="clientsFilterPanel${clientsFiltersOpen ? "" : " hidden"}">
+          <div class="clientsFilterGrid">
+            ${clientsFilterField("cf_username", "Username", "text", "johndoe")}
+            ${clientsFilterField("cf_name", "Name", "text", "John D.")}
+            ${clientsFilterField("cf_profileTitle", "Profile title", "text", "Full Stack Developer")}
+            ${clientsFilterField("cf_country", "Country", "text", "us or United States")}
+            ${clientsFilterField("cf_joinDate", "Joined date", "text", "Mar 15, 2020")}
+            ${clientsFilterField("cf_earning", "Earning", "text", "$7.2")}
+            ${clientsFilterField("cf_reviewCountMin", "Review count min", "number", "0")}
+            ${clientsFilterField("cf_reviewCountMax", "Review count max", "number", "100")}
+            ${clientsFilterField("cf_reviewRateMin", "Review rate min", "number", "0")}
+            ${clientsFilterField("cf_reviewRateMax", "Review rate max", "number", "5")}
+            ${clientsFilterField("cf_lastReviewDate", "Last review date", "text", "2026-03-10")}
+            ${clientsFilterField("cf_lastPostedProject", "Last posted project", "text", "freelancer.com/projects")}
+            ${clientsFilterField("cf_avatar", "Avatar URL", "text", "profile_logo")}
+            ${clientsFilterField("cf_lastPostedFrom", "Last posted from", "date", "")}
+            ${clientsFilterField("cf_lastPostedTo", "Last posted to", "date", "")}
+            ${clientsFilterField("cf_scrapedFrom", "Scraped from", "date", "")}
+            ${clientsFilterField("cf_scrapedTo", "Scraped to", "date", "")}
+            ${clientsFilterField("cf_createdFrom", "Created from", "date", "")}
+            ${clientsFilterField("cf_createdTo", "Created to", "date", "")}
+            ${clientsFilterField("cf_updatedFrom", "Updated from", "date", "")}
+            ${clientsFilterField("cf_updatedTo", "Updated to", "date", "")}
+          </div>
+          <div class="clientsFilterActions">
+            <button id="clientsApplyFilters" class="btnPrimary" type="button">Apply filters</button>
+            <button id="clientsClearFilters" class="btn" type="button">Clear all</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindClientsToolbar() {
+    document.getElementById("clientsSearchBtn")?.addEventListener("click", () => {
+      readClientsFiltersFromDom();
+      void renderClients(1);
+    });
+    document.getElementById("cf_q")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        readClientsFiltersFromDom();
+        void renderClients(1);
+      }
+    });
+    document.getElementById("clientsToggleFilters")?.addEventListener("click", () => {
+      clientsFiltersOpen = !clientsFiltersOpen;
+      const panel = document.getElementById("clientsFilterPanel");
+      const btn = document.getElementById("clientsToggleFilters");
+      panel?.classList.toggle("hidden", !clientsFiltersOpen);
+      if (btn) btn.textContent = clientsFiltersOpen ? "Hide filters" : "Show filters";
+    });
+    document.getElementById("clientsApplyFilters")?.addEventListener("click", () => {
+      readClientsFiltersFromDom();
+      void renderClients(1);
+    });
+    document.getElementById("clientsClearFilters")?.addEventListener("click", () => {
+      clientsFilters = { ...CLIENTS_FILTER_DEFAULTS };
+      clientsPage = 1;
+      void renderClients(1);
+    });
+  }
+
+  function bindClientDeleteButtons(gridEl) {
+    if (!gridEl || !isAdminUser()) return;
+    gridEl.querySelectorAll("[data-delete-client]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const username = btn.getAttribute("data-delete-client") || "";
+        if (!username) return;
+        try {
+          await deleteClientProfile(username);
+          toast("Client profile deleted");
+          const pagerEl = document.getElementById("clientsPager");
+          await loadClientsResults(gridEl, pagerEl);
+        } catch (e) {
+          toast("Error: " + (e?.message || String(e)));
+        }
+      });
+    });
+  }
+
+  async function loadClientsResults(gridEl, pagerEl) {
+    try {
+      const j = await api(buildClientsApiUrl(clientsPage));
+      const profiles = j.profiles || [];
+      if (!profiles.length) {
+        gridEl.innerHTML = `<div class="clientsEmpty muted">No profiles match your search.</div>`;
+      } else {
+        gridEl.innerHTML = profiles.map(renderClientCard).join("");
+        bindClientDeleteButtons(gridEl);
+      }
+
+      const totalPages = j.totalPages || 1;
+      pagerEl.innerHTML = `
+        <button class="btn" type="button" id="clientsPrev" ${clientsPage <= 1 ? "disabled" : ""}>Previous</button>
+        <span class="paginationInfo">Page ${clientsPage} of ${totalPages} · ${j.total ?? 0} profiles</span>
+        <button class="btn" type="button" id="clientsNext" ${clientsPage >= totalPages ? "disabled" : ""}>Next</button>
+      `;
+      document.getElementById("clientsPrev")?.addEventListener("click", () => {
+        if (clientsPage > 1) void renderClients(clientsPage - 1);
+      });
+      document.getElementById("clientsNext")?.addEventListener("click", () => {
+        if (clientsPage < totalPages) void renderClients(clientsPage + 1);
+      });
+    } catch (e) {
+      gridEl.innerHTML = `<div class="clientsEmpty">Error: ${esc(e?.message || String(e))}</div>`;
+      pagerEl.innerHTML = "";
+    }
+  }
+
+  function fmtDateOnly(val) {
+    if (!val) return "—";
+    try {
+      const d = new Date(val);
+      if (!Number.isFinite(d.getTime())) return String(val);
+      return d.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+    } catch {
+      return String(val);
+    }
+  }
+
+  function fmtDateTime(ms) {
+    if (!ms) return "—";
+    try {
+      return new Date(ms).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return "—";
+    }
+  }
+
+  function renderClientProjectStats(p) {
+    const hasStats = [p.openProjects, p.activeProjects, p.pastProjects, p.totalProjects]
+      .some((v) => v != null);
+    if (!hasStats) return "";
+    const row = (label, val) =>
+      `<div class="clientStatRow"><span class="clientStatLabel">${esc(label)}</span><span class="clientStatValue">${val ?? "—"}</span></div>`;
+    return `
+      <div class="clientProjectStats">
+        ${row("Open projects", p.openProjects)}
+        ${row("Active projects", p.activeProjects)}
+        ${row("Past projects", p.pastProjects)}
+        ${row("Total projects", p.totalProjects)}
+      </div>
+    `;
+  }
+
+  function clientDateRow(label, value, href) {
+    if (!value) return "";
+    const valHtml = href
+      ? `<a class="clientDateValue clientProjectLink" href="${esc(href)}" target="_blank" rel="noopener">${esc(value)}</a>`
+      : `<span class="clientDateValue">${esc(value)}</span>`;
+    return `<div class="clientDateRow"><span class="clientDateLabel muted">${esc(label)}</span>${valHtml}</div>`;
+  }
+
+  function renderClientProfilePanel(p) {
+    const name = esc(p.name || p.username || "Unknown");
+    const username = esc(p.username || "");
+    const title = p.profileTitle ? esc(p.profileTitle) : "";
+    const rating = p.reviewRate != null ? Number(p.reviewRate).toFixed(1) : "—";
+    const reviews = p.reviewCount ?? 0;
+    const earning = p.earning ? esc(p.earning) : "—";
+    const countryHtml = p.country ? renderCountryDisplay(p.country) : `<span class="listRowCountry">—</span>`;
+    const verifHtml = renderVerifIcons(p.verificationText);
+    const projectStatsHtml = renderClientProjectStats(p);
+    const profileUrl = p.username
+      ? `https://www.freelancer.com/u/${encodeURIComponent(p.username)}?client-profile=true`
+      : "#";
+    const lastPostedVal = p.lastPostedTime ? fmtDateTime(p.lastPostedTime) : null;
+    const avatar = p.avatar
+      ? `<img class="clientCardAvatar" src="${esc(p.avatar)}" alt="" loading="lazy" decoding="async" />`
+      : `<div class="clientCardAvatar clientCardAvatarFallback">${esc((p.name || p.username || "?").slice(0, 1).toUpperCase())}</div>`;
+
+    return `
+      <div class="clientCardTop">
+        ${avatar}
+        <div class="clientCardMain">
+          ${p.username
+            ? `<a class="clientCardName" href="${esc(profileUrl)}" target="_blank" rel="noopener">${name}</a>`
+            : `<div class="clientCardName">${name}</div>`}
+          ${username ? `<div class="clientCardUsername">@${username}</div>` : ""}
+          ${title ? `<div class="clientCardTitle">${title}</div>` : ""}
+        </div>
+      </div>
+      <div class="clientCardMeta">
+        <div class="clientCardMetaRow clientCardReviewEarn">
+          ${renderStarRating(p.reviewRate ?? 0)}
+          <span class="clientRatingNum">${rating}</span>
+          <span class="clientReviewCount">(${reviews} review${reviews === 1 ? "" : "s"})</span>
+          <span class="clientReviewEarnSep muted">·</span>
+          <span class="clientEarningLabel muted">Earned</span>
+          <span class="clientEarningValue">${earning}</span>
+        </div>
+        <div class="clientCardMetaRow">${countryHtml}</div>
+        ${verifHtml ? `<div class="clientCardMetaRow clientCardVerif"><span class="muted clientVerifLabel">Verifications</span>${verifHtml}</div>` : ""}
+        ${projectStatsHtml}
+        ${p.lastReviewDate ? `<div class="clientCardMetaRow muted">Last review: ${esc(fmtDateOnly(p.lastReviewDate))}</div>` : ""}
+      </div>
+      <div class="clientCardFooter">
+        ${clientDateRow("Last posted", lastPostedVal && lastPostedVal !== "—" ? lastPostedVal : null, p.lastPostedProject || null)}
+        ${clientDateRow("Joined", p.joinDate || null)}
+        ${clientDateRow("Last review", p.lastReviewDate ? fmtDateOnly(p.lastReviewDate) : null)}
+        ${clientDateRow("Scraped", p.scrapedAt ? fmtDateTime(p.scrapedAt) : null)}
+      </div>
+    `;
+  }
+
+  function renderClientCard(p) {
+    const deleteBtn = isAdminUser()
+      ? `<button type="button" class="navRowBtn navRowBtnDanger clientCardDelete" data-delete-client="${esc(p.username)}" title="Delete profile">Delete</button>`
+      : "";
+
+    return `
+      <article class="clientCard">
+        ${deleteBtn}
+        ${renderClientProfilePanel(p)}
+      </article>
+    `;
+  }
+
+  function renderProjectClientFallback(project) {
+    const p = project || {};
+    const name = esc(p.clientName || p.clientUsername || "Unknown");
+    const countryHtml = p.clientCountry ? renderCountryDisplay(p.clientCountry) : "";
+    const verifHtml = renderVerifIcons(p.clientVerificationText);
+    return `
+      <div class="clientModalEmpty">
+        <h3 style="margin:0 0 8px;">${name}</h3>
+        <p class="muted" style="margin:0 0 12px;">No saved client profile yet. Showing project data only.</p>
+        ${countryHtml ? `<div class="clientCardMetaRow">${countryHtml}</div>` : ""}
+        ${p.joinDate ? `<div class="clientCardMetaRow muted">Joined ${esc(p.joinDate)}</div>` : ""}
+        ${verifHtml ? `<div class="clientCardMetaRow clientCardVerif">${verifHtml}</div>` : ""}
+        ${renderClientReview(p)}
+      </div>
+    `;
+  }
+
+  async function openClientProfileModal(username, projectFallback) {
+    const existing = document.getElementById("clientProfileModal");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "clientProfileModal";
+    overlay.className = "modalOverlay";
+    overlay.innerHTML = `
+      <div class="modalCard clientModalCard" role="dialog" aria-modal="true">
+        <button type="button" class="clientModalClose" aria-label="Close">×</button>
+        <div class="clientModalBody muted">Loading…</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+    overlay.querySelector(".clientModalClose")?.addEventListener("click", close);
+
+    const bodyEl = overlay.querySelector(".clientModalBody");
+    const slug = String(username || "").trim().toLowerCase();
+    if (!slug) {
+      if (bodyEl) {
+        bodyEl.innerHTML = renderProjectClientFallback(projectFallback);
+        bodyEl.classList.remove("muted");
+      }
+      return;
+    }
+
+    try {
+      const j = await api("/api/client-profiles/" + encodeURIComponent(slug));
+      if (bodyEl) {
+        bodyEl.innerHTML = `<div class="clientCard clientCardModal">${renderClientProfilePanel(j.profile || {})}</div>`;
+        bodyEl.classList.remove("muted");
+      }
+    } catch {
+      if (bodyEl) {
+        bodyEl.innerHTML = renderProjectClientFallback(projectFallback);
+        bodyEl.classList.remove("muted");
+      }
+    }
+  }
+
+  function renderListClientName(p, itemId) {
+    const name = p.clientName || p.clientUsername || "Unknown";
+    const hasLookup = Boolean(p.clientUsername || p.clientName);
+    if (!hasLookup) {
+      return `<span class="listRowClientName muted">${esc(name)}</span>`;
+    }
+    return `<button type="button" class="listRowClientLink" data-action="show-client" data-id="${esc(itemId)}" title="View client profile">${esc(name)}</button>`;
+  }
+
+  async function renderClients(page) {
+    if (!isAdminUser()) {
+      nav("/app");
+      return;
+    }
+    if (page) clientsPage = page;
+    setMainLayout("clients");
+    updateHeaderSession();
+    render(`
+      <div class="clientsPage">
+        <div class="listHeader">
+          <h2>Client profiles</h2>
+          <div class="sub">Scraped employer profiles from new projects.</div>
+        </div>
+        ${renderClientsToolbar()}
+        <div id="clientsGrid" class="clientGrid"><div class="muted clientsLoading">Loading…</div></div>
+        <div id="clientsPager" class="pagination"></div>
+      </div>
+    `);
+
+    bindClientsToolbar();
+    const gridEl = document.getElementById("clientsGrid");
+    const pagerEl = document.getElementById("clientsPager");
+    await loadClientsResults(gridEl, pagerEl);
   }
 
   function fmtTimeAgo(ms) {
@@ -686,6 +1393,25 @@
     return "";
   }
 
+  function titleCaseCountry(name) {
+    return String(name || "")
+      .split(/\s+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
+
+  const COUNTRY_CODE_TO_NAME = {};
+  for (const [name, code] of Object.entries(COUNTRY_NAME_TO_CODE)) {
+    if (!COUNTRY_CODE_TO_NAME[code]) COUNTRY_CODE_TO_NAME[code] = titleCaseCountry(name);
+  }
+  COUNTRY_CODE_TO_NAME.AE = "United Arab Emirates";
+
+  function countryCodeToName(code) {
+    const c = String(code || "").trim().toUpperCase();
+    if (!c) return "";
+    return COUNTRY_CODE_TO_NAME[c] || c;
+  }
+
   function parseClientCountry(raw) {
     const s = String(raw || "").trim();
     if (!s) return { code: "", name: "" };
@@ -693,18 +1419,19 @@
     const globeCode = s.match(/^🌍\s*([A-Za-z]{2})$/);
     if (globeCode) {
       const code = globeCode[1].toUpperCase();
-      return { code, name: code };
+      return { code, name: countryCodeToName(code) };
     }
 
     const withoutFlag = s.replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "").trim();
     if (withoutFlag && withoutFlag !== s) {
-      const code = countryNameToCode(withoutFlag);
-      return { code, name: withoutFlag };
+      const code = countryNameToCode(withoutFlag) || (/^[A-Za-z]{2}$/.test(withoutFlag) ? withoutFlag.toUpperCase() : "");
+      const name = /^[A-Za-z]{2}$/.test(withoutFlag) ? countryCodeToName(withoutFlag) : withoutFlag;
+      return { code, name };
     }
 
     if (/^[A-Za-z]{2}$/.test(s)) {
       const code = s.toUpperCase();
-      return { code, name: code };
+      return { code, name: countryCodeToName(code) };
     }
 
     const code = countryNameToCode(s);
@@ -890,7 +1617,6 @@
     if (/🪪|💰|💳|✉️|📞|👤/.test(s)) {
       if (/🟢🪪/.test(s)) push("id", "Identity verified");
       if (/🟢💰/.test(s)) push("payment", "Payment verified");
-      if (/🟢💳/.test(s)) push("deposit", "Deposit made");
       if (/🟢✉️/.test(s)) push("mail", "Email verified");
       if (/🟢📞/.test(s)) push("phone", "Phone verified");
       if (/🟢👤/.test(s)) push("profile", "Profile complete");
@@ -901,8 +1627,6 @@
         else if (p === "mail" || p === "email") push("mail", "Email verified");
         else if (p === "id") push("id", "Identity verified");
         else if (p === "phone") push("phone", "Phone verified");
-        else if (p === "deposit") push("deposit", "Deposit made");
-        else if (p === "fb") push("profile", "Facebook connected");
         else if (p === "profile") push("profile", "Profile complete");
       }
       if (!flags.length) {
@@ -910,7 +1634,6 @@
         if (/mail|email/i.test(s)) push("mail", "Email verified");
         if (/\bid\b/i.test(s)) push("id", "Identity verified");
         if (/phone/i.test(s)) push("phone", "Phone verified");
-        if (/deposit/i.test(s)) push("deposit", "Deposit made");
       }
     }
 
@@ -954,6 +1677,8 @@
               ${budget.code ? `<span class="listRowCurrency">${budget.code}</span>` : ""}
               <span class="listRowMetaSep">·</span>
               ${renderCountryDisplay(p.clientCountry)}
+              <span class="listRowMetaSep">·</span>
+              ${renderListClientName(p, item.id)}
             </div>
             ${snippet ? `<div class="listRowSnippet" data-action="copy-details" data-id="${esc(item.id)}" title="Click to copy details">${snippet}<span class="listRowMore">more</span></div>` : ""}
             ${skills.length ? `<div class="listRowSkills">${skills.map((s) => `<span>${esc(s)}</span>`).join('<span class="skillsDot">·</span>')}</div>` : ""}
@@ -973,6 +1698,7 @@
   }
 
   function renderApp() {
+    setMainLayout("default");
     updateHeaderSession();
     const styles = settings?.styles || [];
     render(`
@@ -1066,6 +1792,14 @@
           void copyText(buildDetailsText(item.project));
           return;
         }
+        if (action === "show-client") {
+          e.preventDefault();
+          e.stopPropagation();
+          const proj = item.project || {};
+          const username = proj.clientUsername || proj.clientName || "";
+          void openClientProfileModal(username, proj);
+          return;
+        }
         if (action === "write-bid") {
           (async () => {
             try {
@@ -1129,6 +1863,7 @@
     }
     if (!eventSource) await bootstrapFeed();
     if (r === "/admin") return renderAdmin();
+    if (r === "/clients") return renderClients();
     if (r === "/profile") return renderProfile();
     return renderApp();
   }

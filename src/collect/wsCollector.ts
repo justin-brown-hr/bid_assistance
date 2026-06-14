@@ -7,10 +7,16 @@
  */
 
 import WebSocket from "ws";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Project } from "../types.js";
+import { isLoginHeadless } from "./browserLaunch.js";
+import {
+  loadFlSession,
+  saveFlSession,
+  type SavedCookie,
+} from "./flSession.js";
+import { flLogin } from "./flLogin.js";
+import { sharedBrowser } from "./sharedBrowser.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,31 +68,11 @@ type WsProjectData = {
 // ---------------------------------------------------------------------------
 
 const BASE_URL = "https://www.freelancer.com";
-const CHROME_PATH = process.platform === "win32"
-  ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-  : "/usr/bin/google-chrome-stable";
-const SESSION_FILE = path.join("data", "fl-session.json");
 const WS_BASE = "wss://notifications.freelancer.com";
 
-// ---------------------------------------------------------------------------
-// Session helpers
-// ---------------------------------------------------------------------------
-
-type SavedCookie = {
-  name: string; value: string; domain: string;
-  path: string; expires: number; httpOnly: boolean;
-  secure: boolean; sameSite?: "Strict" | "Lax" | "None";
-};
-
-async function loadSession(): Promise<{ cookies: SavedCookie[]; savedAt: number } | null> {
-  try { return JSON.parse(await readFile(SESSION_FILE, "utf8")); }
-  catch { return null; }
-}
-
-async function saveSession(cookies: SavedCookie[]): Promise<void> {
-  await mkdir(path.dirname(SESSION_FILE), { recursive: true });
-  await writeFile(SESSION_FILE, JSON.stringify({ cookies, savedAt: Date.now() }, null, 2), "utf8");
-}
+// Session helpers — see flSession.ts
+const loadSession = loadFlSession;
+const saveSession = saveFlSession;
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -113,10 +99,8 @@ function formatVerification(s: WsProjectData["client_status"]): string | undefin
   const verified: string[] = [];
   if (s.identity_verified) verified.push("ID");
   if (s.payment_verified) verified.push("Payment");
-  if (s.deposit_made) verified.push("Deposit");
   if (s.email_verified) verified.push("Mail");
   if (s.phone_verified) verified.push("Phone");
-  if (s.facebook_connected) verified.push("FB");
   if (s.profile_complete) verified.push("Profile");
   return verified.length ? verified.join(", ") : "None";
 }
@@ -356,7 +340,9 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
       ? new Date(d.time_submitted * 1000).toISOString()
       : undefined,
     clientName: d.userName,
+    clientUsername: d.userName,
     clientCountry: country,
+    clientCountryCode: userInfo?.countryCode,
     clientVerificationText: formatVerification(d.client_status),
     clientReviewText: formatClientReview(reviewOverall, reviewCount),
     clientReviewRating: normalizeRating(reviewOverall) ?? 0,
@@ -411,103 +397,40 @@ async function extractAuthFromBrowser(opts: {
     }
   }
 
-  // Step 2: Session expired — use browser to log in and get fresh cookies
-  console.log("[ws] Launching browser for login...");
+  // Step 2: Session expired — use shared browser to log in and keep Chrome open
+  const loginHeadless = isLoginHeadless();
+  console.log(
+    loginHeadless
+      ? "[ws] Launching headless browser for login (set LOGIN_HEADLESS=false for visible Chrome)..."
+      : "[ws] Launching visible Chrome for login — solve CAPTCHA manually in the browser window if prompted.",
+  );
   const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-  let browser: Browser | null = null;
-  let page: Page | null = null;
 
-  try {
-    browser = await puppeteer.launch({
-      executablePath: CHROME_PATH,
-      headless: process.env.HEADLESS !== "false",
-      args: ["--no-sandbox", "--disable-setuid-sandbox",
-             "--disable-blink-features=AutomationControlled",
-             "--disable-dev-shm-usage", "--window-size=1280,800",
-             "--disable-gpu"],
-    });
+  const browser = await sharedBrowser.getBrowser();
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800 });
+  await page.setUserAgent(ua);
+  await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+  });
 
-    page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    await page.setUserAgent(ua);
-    await page.setExtraHTTPHeaders({ "accept-language": "en-US,en;q=0.9" });
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
+  await flLogin(page, opts.email, opts.password, "ws");
 
-    await login(page, opts.email, opts.password);
-
-    // Extract hash from fresh cookies
-    const cookies = await page.cookies() as SavedCookie[];
-    let hash2 = "";
-    let userId = 0;
-    for (const c of cookies) {
-      if (c.name === "GETAFREE_AUTH_HASH_V2") hash2 = decodeURIComponent(c.value);
-      if (c.name === "GETAFREE_USER_ID") userId = parseInt(c.value);
-    }
-
-    if (!hash2 || !userId) throw new Error("[ws] Could not get auth hash after login");
-
-    await saveSession(cookies);
-    setSessionCookies(cookies);
-    console.log(`[ws] Auth from fresh login: userId=${userId}`);
-    return { hash2, userId, cookies };
-  } finally {
-    await browser?.close();
+  const cookies = await page.cookies() as SavedCookie[];
+  let hash2 = "";
+  let userId = 0;
+  for (const c of cookies) {
+    if (c.name === "GETAFREE_AUTH_HASH_V2") hash2 = decodeURIComponent(c.value);
+    if (c.name === "GETAFREE_USER_ID") userId = parseInt(c.value);
   }
-}
 
-async function login(page: Page, email: string, password: string): Promise<void> {
-  await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle2", timeout: 60000 });
-  const emailSel = 'fl-email-input input, input[type="email"], input[name="username"]';
-  try {
-    await page.waitForSelector(emailSel, { timeout: 40000 });
-  } catch {
-    const url = page.url();
-    if (!url.includes("/login")) return;
-    throw new Error(`[ws] Login page did not render. URL: ${url}`);
-  }
-  await new Promise(r => setTimeout(r, 1000));
-  await page.focus(emailSel);
-  await page.keyboard.type(email, { delay: 60 });
-  await page.waitForSelector('fl-password-input input, input[type="password"]', { timeout: 10000 });
-  await page.focus('fl-password-input input, input[type="password"]');
-  await page.keyboard.type(password, { delay: 60 });
-  await new Promise(r => setTimeout(r, 500));
-  await page.keyboard.press("Enter");
-  try {
-    await page.waitForFunction("!document.location.href.includes('/login')", { timeout: 60000 });
-  } catch {
-    const maxMs = Number(process.env.CAPTCHA_WAIT_MS ?? "0");
-    const headless = process.env.HEADLESS !== "false";
-    const allowLongWait = !headless;
-    const effectiveMaxMs = (allowLongWait && maxMs <= 0) ? 30 * 60 * 1000 : maxMs; // default 30m when headed
+  if (!hash2 || !userId) throw new Error("[ws] Could not get auth hash after login");
 
-    console.log(
-      `[ws] CAPTCHA likely required. Solve it in the browser window.` +
-      (effectiveMaxMs > 0 ? ` Waiting up to ${Math.round(effectiveMaxMs / 60000)} min...` : " Waiting indefinitely..."),
-    );
-
-    const start = Date.now();
-    // Wait in chunks so we can print progress and avoid a hard crash.
-    // If CAPTCHA_WAIT_MS is unset/0 and HEADLESS=false, this defaults to 30 minutes.
-    while (true) {
-      const elapsed = Date.now() - start;
-      if (effectiveMaxMs > 0 && elapsed >= effectiveMaxMs) {
-        throw new Error(`[ws] CAPTCHA not solved within ${Math.round(effectiveMaxMs / 60000)} minutes`);
-      }
-      const remaining = effectiveMaxMs > 0 ? Math.max(0, effectiveMaxMs - elapsed) : 5 * 60 * 1000;
-      const chunkMs = Math.min(5 * 60 * 1000, remaining || 5 * 60 * 1000);
-      try {
-        await page.waitForFunction("!document.location.href.includes('/login')", { timeout: chunkMs });
-        break;
-      } catch {
-        console.log("[ws] Still on login page — waiting for CAPTCHA/verification to complete...");
-      }
-    }
-  }
-  await saveSession(await page.cookies());
-  console.log("[ws] Login successful.");
+  await saveSession(cookies);
+  setSessionCookies(cookies);
+  console.log(`[ws] Auth from fresh login: userId=${userId} (shared Chrome kept open for profile tabs)`);
+  return { hash2, userId, cookies };
 }
 
 // ---------------------------------------------------------------------------

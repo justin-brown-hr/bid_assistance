@@ -4,6 +4,8 @@ import { cfg } from "./config.js";
 import OpenAI from "openai";
 import crypto from "node:crypto";
 import { DashboardDbSqlite } from "./dashboardDbSqlite.js";
+import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
+import type { ClientProfileScrapeRequest, ClientProfileFilters } from "./types.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -397,11 +399,49 @@ function escHtml(s: string): string {
 
 const ADMIN_USERNAME = "riora";
 
+function parseOptionalNumber(raw: string | null): number | undefined {
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseClientProfileFilters(params: URLSearchParams): ClientProfileFilters {
+  const str = (key: string) => {
+    const v = params.get(key)?.trim();
+    return v || undefined;
+  };
+  return {
+    q: str("q"),
+    username: str("username"),
+    name: str("name"),
+    avatar: str("avatar"),
+    profileTitle: str("profileTitle"),
+    earning: str("earning"),
+    lastReviewDate: str("lastReviewDate"),
+    country: str("country"),
+    joinDate: str("joinDate"),
+    lastPostedProject: str("lastPostedProject"),
+    reviewCountMin: parseOptionalNumber(params.get("reviewCountMin")),
+    reviewCountMax: parseOptionalNumber(params.get("reviewCountMax")),
+    reviewRateMin: parseOptionalNumber(params.get("reviewRateMin")),
+    reviewRateMax: parseOptionalNumber(params.get("reviewRateMax")),
+    lastPostedFrom: parseOptionalNumber(params.get("lastPostedFrom")),
+    lastPostedTo: parseOptionalNumber(params.get("lastPostedTo")),
+    scrapedFrom: parseOptionalNumber(params.get("scrapedFrom")),
+    scrapedTo: parseOptionalNumber(params.get("scrapedTo")),
+    createdFrom: parseOptionalNumber(params.get("createdFrom")),
+    createdTo: parseOptionalNumber(params.get("createdTo")),
+    updatedFrom: parseOptionalNumber(params.get("updatedFrom")),
+    updatedTo: parseOptionalNumber(params.get("updatedTo")),
+  };
+}
+
 export class DashboardServer {
   private readonly items: DashboardItem[] = [];
   private readonly clients = new Set<http.ServerResponse>();
   private server: http.Server | null = null;
   private db: DashboardDbSqlite | null = null;
+  private clientProfiles: ClientProfileService | null = null;
 
   constructor(private readonly opts: { port: number; maxItems?: number }) {}
 
@@ -502,6 +542,10 @@ export class DashboardServer {
     return trimmed;
   }
 
+  requestClientProfileScrape(req: ClientProfileScrapeRequest): void {
+    this.clientProfiles?.enqueue(req);
+  }
+
   start(): void {
     if (this.server) return;
 
@@ -512,6 +556,13 @@ export class DashboardServer {
     try {
       this.db.connect();
       console.log(`[dashboard] SQLite ready: ${cfg.dashboard.sqlitePath}`);
+      if (cfg.freelancer.email && cfg.freelancer.password) {
+        this.clientProfiles = new ClientProfileService(this.db, {
+          email: cfg.freelancer.email,
+          password: cfg.freelancer.password,
+        });
+        this.clientProfiles.start();
+      }
     } catch (e) {
       console.error("[dashboard] SQLite init failed:", e);
     }
@@ -664,6 +715,32 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/settings/password" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const body = (await this.readJsonBody(req)) as {
+              currentPasscode?: string;
+              newPasscode?: string;
+            };
+            const currentPasscode = String(body.currentPasscode ?? "");
+            const newPasscode = String(body.newPasscode ?? "");
+            if (!currentPasscode || !newPasscode) throw new Error("Current and new passcode are required");
+            this.db.changePassword(username, currentPasscode, newPasscode);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname === "/api/settings/openai" && req.method === "POST") {
         (async () => {
           try {
@@ -753,6 +830,105 @@ export class DashboardServer {
             res.statusCode = 400;
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify(out));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/client-profiles" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
+            const limit = Math.max(1, Number(url.searchParams.get("limit") ?? "20") || 20);
+            const filters = parseClientProfileFilters(url.searchParams);
+            const result = this.db.listClientProfiles(page, limit, filters);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, ...result }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/client-profiles/") && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            if (!this.verifySession(req.headers.cookie)) throw new Error("Not logged in");
+            const suffix = url.pathname.slice("/api/client-profiles/".length);
+            if (!suffix || suffix === "scrape") throw new Error("Invalid client username");
+            const username = decodeURIComponent(suffix).trim();
+            if (!username) throw new Error("Client username required");
+            const profile = this.db.getClientProfile(username);
+            if (!profile) throw new Error("Client profile not found");
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, profile }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401
+              : msg === "Client profile not found" ? 404
+                : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/client-profiles/") && req.method === "DELETE") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const suffix = url.pathname.slice("/api/client-profiles/".length);
+            if (!suffix || suffix === "scrape") throw new Error("Invalid client username");
+            const username = decodeURIComponent(suffix).trim();
+            if (!username) throw new Error("Client username required");
+            this.db.deleteClientProfile(username);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/client-profiles/scrape" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            if (!this.verifySession(req.headers.cookie)) throw new Error("Not logged in");
+            const body = (await this.readJsonBody(req)) as {
+              username?: string;
+              projectUrl?: string;
+              country?: string;
+            };
+            const username = String(body.username ?? "").trim();
+            const projectUrl = String(body.projectUrl ?? "").trim();
+            if (!username || !projectUrl) throw new Error("username and projectUrl required");
+            this.requestClientProfileScrape({
+              username,
+              projectUrl,
+              country: body.country?.trim() || undefined,
+              postedAt: Date.now(),
+            });
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, queued: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
           }
         })();
         return;
@@ -916,6 +1092,13 @@ export class DashboardServer {
         cursor: pointer;
       }
       .brandHome:hover { opacity: 0.92; }
+      .headerLeft {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex: 1;
+      }
       .markIcon {
         width: 34px;
         height: 34px;
@@ -927,6 +1110,36 @@ export class DashboardServer {
       }
       header h1 { font-size: 14px; margin:0; font-weight: 700; letter-spacing: .2px; }
       header .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+      .headerNav {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: 8px;
+      }
+      .headerNav.hidden { display: none; }
+      .headerNavLink {
+        appearance: none;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 600;
+        padding: 8px 14px;
+        border-radius: 8px;
+        cursor: pointer;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .headerNavLink:hover {
+        color: var(--text);
+        background: var(--btnHover);
+      }
+      .headerNavLinkActive {
+        color: var(--link);
+        background: rgba(11, 101, 194, 0.1);
+        border-color: rgba(11, 101, 194, 0.25);
+      }
+      .headerNavLink.hidden { display: none; }
       .headerActions {
         display: flex;
         align-items: center;
@@ -958,6 +1171,25 @@ export class DashboardServer {
       .headerAdminIcon:hover {
         background: rgba(37, 99, 235, 0.1);
         border-color: #2563eb;
+      }
+      .headerNavIcon {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        background: var(--btn);
+        color: var(--link);
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .headerNavIcon:hover {
+        background: var(--btnHover);
+        border-color: var(--link);
       }
       .headerUserWrap {
         display: flex;
@@ -1251,9 +1483,17 @@ export class DashboardServer {
         max-width: 1280px;
         width: 100%;
         margin: 0 auto;
-        overflow: hidden;
+        overflow: auto;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
         box-sizing: border-box;
       }
+      main.mainClients {
+        max-width: none;
+        margin: 0;
+        padding: 10px 12px 14px;
+      }
+      main::-webkit-scrollbar { width: 0; height: 0; }
       .pill {
         display:inline-flex;
         align-items:center;
@@ -1328,6 +1568,79 @@ export class DashboardServer {
         color: var(--text);
       }
       textarea { min-height: 130px; resize: vertical; }
+      .profilePage textarea,
+      .profileStyleText { min-height: 240px; font-size: 15px; line-height: 1.5; }
+      .profilePage input[type="text"],
+      .profilePage input[type="password"] { padding: 12px; font-size: 15px; }
+      .btnLoading { opacity: 0.75; cursor: wait; }
+      .listRowClientLink {
+        appearance: none;
+        border: none;
+        background: none;
+        padding: 0;
+        margin: 0;
+        font: inherit;
+        font-size: inherit;
+        color: var(--link);
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+      }
+      .listRowClientLink:hover { text-decoration: underline; }
+      .listRowClientName { font-weight: 600; color: var(--text-desc); }
+      .clientModalCard {
+        max-width: 420px;
+        padding: 0;
+        overflow: hidden;
+        position: relative;
+      }
+      .clientCardModal {
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      .clientModalClose {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 2;
+        width: 32px;
+        height: 32px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font-size: 20px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .clientModalClose:hover { background: var(--btnHover); }
+      .clientModalEmpty { padding: 22px; font-size: 14px; line-height: 1.5; }
+      .modalOverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        background: rgba(15, 23, 42, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      .modalCard {
+        width: 100%;
+        max-width: 580px;
+        max-height: 90vh;
+        overflow: auto;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 22px;
+        box-shadow: 0 20px 48px rgba(0, 0, 0, 0.2);
+      }
+      .modalCard h3 { margin: 0 0 8px; font-size: 18px; font-weight: 700; }
+      .modalCard .sub { margin-bottom: 16px; }
+      .modalActions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
       input:focus, textarea:focus { border-color:#93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
       .panelActions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 12px; }
       .btnPrimary {
@@ -1449,6 +1762,174 @@ export class DashboardServer {
       .listHeader { margin-bottom: 12px; padding: 0 2px; }
       .listHeader h2 { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); }
       .listHeader .sub { margin-top: 6px; font-size: 14px; color: var(--muted); }
+      a.inlineLink { color: var(--link); text-decoration: underline; }
+      a.inlineLink:hover { opacity: 0.85; }
+      .clientsPage { width: 100%; max-width: none; margin: 0; }
+      .clientGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 12px;
+      }
+      .clientCard {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        position: relative;
+      }
+      .clientCardDelete {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 1;
+        padding: 1px 7px;
+        font-size: 10px;
+      }
+      .clientCardTop { display: flex; gap: 10px; align-items: flex-start; }
+      .clientCardAvatar {
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        object-fit: cover;
+        flex-shrink: 0;
+        border: 1px solid var(--border);
+      }
+      .clientCardAvatarFallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--btnHover);
+        color: var(--link);
+        font-weight: 700;
+        font-size: 18px;
+      }
+      .clientCardMain { min-width: 0; flex: 1; padding-right: 52px; }
+      .clientCardName {
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--link);
+        text-decoration: none;
+        line-height: 1.25;
+      }
+      .clientCardName:hover { text-decoration: underline; }
+      .clientCardUsername { font-size: 12px; color: var(--muted); margin-top: 1px; }
+      .clientCardTitle { font-size: 12px; color: var(--text); margin-top: 4px; line-height: 1.3; }
+      .clientCardMeta { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+      .clientCardMetaRow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+      .clientCardVerif { align-items: center; gap: 8px; }
+      .clientVerifLabel { font-size: 11px; min-width: 72px; }
+      .clientProjectStats {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding-top: 3px;
+        border-top: 1px solid var(--border);
+        margin-top: 1px;
+      }
+      .clientStatRow {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+      }
+      .clientStatLabel { color: var(--text); }
+      .clientStatValue { color: #2ecc71; font-weight: 600; }
+      .clientEarningLabel { color: var(--muted); }
+      .clientEarningValue { font-weight: 700; color: var(--text); }
+      .clientCardReviewEarn { flex-wrap: wrap; gap: 5px; }
+      .clientReviewEarnSep { margin: 0 2px; }
+      .clientDateRow {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+      }
+      .clientDateLabel { flex-shrink: 0; }
+      .clientDateValue {
+        text-align: right;
+        margin-left: auto;
+        font-weight: 500;
+        color: var(--text);
+        white-space: nowrap;
+      }
+      .clientCardFooter {
+        border-top: 1px solid var(--border);
+        padding-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+      }
+      .clientProjectLink { color: var(--link); font-weight: 600; text-decoration: none; }
+      .clientProjectLink:hover { text-decoration: underline; }
+      .clientsEmpty, .clientsLoading { padding: 40px 20px; text-align: center; }
+      .pagination {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        margin-top: 24px;
+        flex-wrap: wrap;
+      }
+      .paginationInfo { font-size: 14px; color: var(--muted); }
+      .clientsToolbar {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .clientsSearchRow {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .clientsSearchRow input[type="search"],
+      .clientsSearchRow input[type="text"] {
+        flex: 1;
+        min-width: 200px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 14px;
+        background: var(--input);
+        color: var(--text);
+      }
+      .clientsFilterPanel {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid var(--border);
+      }
+      .clientsFilterPanel.hidden { display: none; }
+      .clientsFilterGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 12px;
+      }
+      .clientsFilterGrid .field { margin: 0; }
+      .clientsFilterGrid .label { font-size: 12px; margin-bottom: 4px; }
+      .clientsFilterGrid input,
+      .clientsFilterGrid select {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 13px;
+        background: var(--input);
+        color: var(--text);
+      }
+      .clientsFilterActions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
       .list { display:flex; flex-direction:column; gap:0; }
       .listFeed {
         background: var(--card);
@@ -1669,6 +2150,7 @@ export class DashboardServer {
   </head>
   <body>
     <header>
+      <div class="headerLeft">
       <a href="#/app" class="brandHome" id="brandHome" title="Home" aria-label="Home">
         <img class="markIcon" src="https://www.freelancer.com/favicon.ico" width="34" height="34" alt="" />
         <div>
@@ -1676,6 +2158,11 @@ export class DashboardServer {
           <div class="meta">Projects feed + bid writer.</div>
         </div>
       </a>
+      <nav class="headerNav hidden" id="headerNav" aria-label="Main navigation">
+        <a href="#/app" class="headerNavLink" id="headerProjectsLink">Projects</a>
+        <a href="#/clients" class="headerNavLink" id="headerClientsLink">Clients</a>
+      </nav>
+      </div>
       <div class="headerActions">
         <div id="headerSession" class="headerSession hidden"></div>
       </div>
