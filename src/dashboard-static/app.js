@@ -498,6 +498,23 @@
     return String(j.bid || "");
   }
 
+  function slackSendButtonLabel() {
+    if (!settings?.hasSlackConnected) {
+      return "Send to Good Job (connect Slack in Profile)";
+    }
+    const raw = String(settings?.slackUsername || "").trim().replace(/^@+/, "");
+    if (!raw) return "Send to Good Job";
+    return `Send to Good Job with @${raw}`;
+  }
+
+  async function sendSlackForProject(project) {
+    await api("/api/slack", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project }),
+    });
+  }
+
   function styleNameTaken(name, excludeStyleId, styles) {
     const n = String(name || "").trim().toLowerCase();
     if (!n) return false;
@@ -694,6 +711,24 @@
         </div>
 
         <div class="card" style="margin-top:12px;">
+          <div class="metaRow"><span><b>Slack</b></span></div>
+          <div class="sub">Connect your Slack account once. Messages post as <b>you</b> in #Good Job — you can delete them like normal Slack messages.</div>
+          ${
+            settings?.hasSlackConnected
+              ? `<div class="metaRow"><span>Connected as <b>@${esc((settings.slackUsername || "slack").replace(/^@+/, ""))}</b></span></div>`
+              : `<div class="metaRow muted">Not connected</div>`
+          }
+          <div class="panelActions">
+            ${
+              settings?.hasSlackConnected
+                ? `<button id="disconnectSlack" class="btn" type="button">Disconnect Slack</button>`
+                : `<button id="connectSlack" class="btnPrimary" type="button">Connect Slack</button>`
+            }
+          </div>
+          <div id="slackmsg" class="resultMeta"></div>
+        </div>
+
+        <div class="card" style="margin-top:12px;">
           <div class="metaRow"><span><b>Change passcode</b></span></div>
           <div class="field"><div class="label">Current passcode</div><input id="pwCur" type="password" autocomplete="current-password" /></div>
           <div class="field"><div class="label">New passcode</div><input id="pwNew" type="password" autocomplete="new-password" /></div>
@@ -767,6 +802,38 @@
         }
       }
     });
+
+    document.getElementById("connectSlack")?.addEventListener("click", () => {
+      window.location.href = "/api/slack/oauth/start";
+    });
+
+    document.getElementById("disconnectSlack")?.addEventListener("click", async () => {
+      const slackmsg = document.getElementById("slackmsg");
+      try {
+        await api("/api/slack/disconnect", { method: "POST" });
+        await loadSettings();
+        toast("Slack disconnected");
+        nav("/profile");
+      } catch (e) {
+        const errMsg = e?.message || String(e);
+        alert("Error: " + errMsg);
+        if (slackmsg) slackmsg.textContent = "Error: " + errMsg;
+      }
+    });
+
+    const profileParams = new URLSearchParams((window.location.hash.split("?")[1] || ""));
+    if (profileParams.get("slack") === "connected") {
+      toast("Slack connected");
+      if (window.location.hash.includes("?")) {
+        window.location.hash = "#/profile";
+      }
+    }
+    const slackErr = profileParams.get("slack_error");
+    if (slackErr) {
+      const slackmsg = document.getElementById("slackmsg");
+      if (slackmsg) slackmsg.textContent = "Error: " + slackErr;
+      window.location.hash = "#/profile";
+    }
 
     document.getElementById("saveKey")?.addEventListener("click", async () => {
       const openaiKey = document.getElementById("key")?.value || "";
@@ -1687,6 +1754,7 @@
             ${renderClientReview(p)}
           </div>
           <div class="listRowActions">
+            <button class="btn slackSendBtn" type="button" data-action="send-slack" data-id="${esc(item.id)}" title="Post project URL to Good Job on Slack">${esc(slackSendButtonLabel())}</button>
             <button class="btnPrimary" type="button" data-action="write-bid" data-id="${esc(item.id)}">Write bid</button>
             <div class="listRowStats">
               ${renderProgBar("Cool", cool)}
@@ -1810,6 +1878,25 @@
               setBid(bid, false);
             } catch (err) {
               setBid("Error: " + (err?.message || String(err)), true);
+            }
+          })();
+          return;
+        }
+        if (action === "send-slack") {
+          e.preventDefault();
+          e.stopPropagation();
+          const btn = actionEl;
+          btn.disabled = true;
+          btn.textContent = "Sending…";
+          (async () => {
+            try {
+              await sendSlackForProject(item.project);
+              toast("Sent to Good Job");
+            } catch (err) {
+              alert("Error: " + (err?.message || String(err)));
+            } finally {
+              btn.disabled = false;
+              btn.textContent = slackSendButtonLabel();
             }
           })();
           return;

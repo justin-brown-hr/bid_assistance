@@ -116,6 +116,21 @@ export class DashboardDbSqlite {
         // column already exists
       }
     }
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN slack_username TEXT`);
+    } catch {
+      // column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN slack_user_id TEXT`);
+    } catch {
+      // column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN slack_user_token_enc TEXT`);
+    } catch {
+      // column already exists
+    }
   }
 
   close(): void {
@@ -239,6 +254,15 @@ export class DashboardDbSqlite {
     return { username };
   }
 
+  hasUser(usernameRaw: string): boolean {
+    if (!this.db) return false;
+    const username = this.normUsername(usernameRaw);
+    const row = this.db.prepare("SELECT 1 FROM users WHERE username = ?").get(username) as
+      | { 1: number }
+      | undefined;
+    return Boolean(row);
+  }
+
   resetPassword(usernameRaw: string, newPasscode: string): void {
     if (!this.db) throw new Error("DB not connected");
     const username = this.normUsername(usernameRaw);
@@ -262,10 +286,19 @@ export class DashboardDbSqlite {
   getUserSettings(usernameRaw: string): {
     username: string;
     hasOpenaiKey: boolean;
+    hasSlackConnected: boolean;
+    slackUsername: string;
+    slackUserId: string;
     styles: Array<{ styleId: string; name: string; updatedAt: number }>;
   } {
     if (!this.db) throw new Error("DB not connected");
     const username = this.normUsername(usernameRaw);
+
+    const userRow = this.db
+      .prepare("SELECT slack_username, slack_user_id, slack_user_token_enc FROM users WHERE username = ?")
+      .get(username) as
+      | { slack_username: string | null; slack_user_id: string | null; slack_user_token_enc: string | null }
+      | undefined;
 
     const secret = this.db.prepare("SELECT 1 FROM secrets WHERE username = ?").get(username) as
       | { 1: number }
@@ -279,6 +312,9 @@ export class DashboardDbSqlite {
     return {
       username,
       hasOpenaiKey,
+      hasSlackConnected: Boolean(userRow?.slack_user_token_enc),
+      slackUsername: userRow?.slack_username?.trim() ?? "",
+      slackUserId: userRow?.slack_user_id?.trim() ?? "",
       styles: styles.map((s) => ({ styleId: s.style_id, name: s.name, updatedAt: s.updated_at })),
     };
   }
@@ -313,6 +349,71 @@ export class DashboardDbSqlite {
       VALUES(?,?,?)
       ON CONFLICT(username) DO UPDATE SET openai_key_enc=excluded.openai_key_enc, updated_at=excluded.updated_at
     `).run(username, enc, now);
+  }
+
+  upsertSlackConnection(
+    usernameRaw: string,
+    connection: { userToken: string; userId: string; displayName: string },
+  ): void {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    const userId = connection.userId.trim().toUpperCase();
+    const displayName = connection.displayName.trim().replace(/^@+/, "");
+    if (!userId || !/^U[A-Z0-9]+$/.test(userId)) {
+      throw new Error("Invalid Slack user id from OAuth");
+    }
+    const enc = this.encrypt(username, connection.userToken.trim());
+    const r = this.db
+      .prepare(
+        "UPDATE users SET slack_user_token_enc = ?, slack_user_id = ?, slack_username = ? WHERE username = ?",
+      )
+      .run(enc, userId, displayName || null, username);
+    if (r.changes === 0) {
+      throw new Error("User account not found — sign out, sign in again, then connect Slack");
+    }
+  }
+
+  clearSlackConnection(usernameRaw: string): void {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    this.db
+      .prepare(
+        "UPDATE users SET slack_user_token_enc = NULL, slack_user_id = NULL, slack_username = NULL WHERE username = ?",
+      )
+      .run(username);
+  }
+
+  getSlackUserToken(usernameRaw: string): string | undefined {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    const row = this.db.prepare("SELECT slack_user_token_enc FROM users WHERE username = ?").get(username) as
+      | { slack_user_token_enc: string | null }
+      | undefined;
+    if (!row?.slack_user_token_enc) return undefined;
+    return this.decrypt(username, row.slack_user_token_enc);
+  }
+
+  getSlackProfile(usernameRaw: string): {
+    slackUsername: string;
+    slackUserId: string;
+    hasSlackConnected: boolean;
+  } {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    const row = this.db
+      .prepare("SELECT slack_username, slack_user_id, slack_user_token_enc FROM users WHERE username = ?")
+      .get(username) as
+      | { slack_username: string | null; slack_user_id: string | null; slack_user_token_enc: string | null }
+      | undefined;
+    return {
+      slackUsername: row?.slack_username?.trim() ?? "",
+      slackUserId: row?.slack_user_id?.trim() ?? "",
+      hasSlackConnected: Boolean(row?.slack_user_token_enc),
+    };
+  }
+
+  getSlackUsername(usernameRaw: string): string {
+    return this.getSlackProfile(usernameRaw).slackUsername;
   }
 
   upsertStyle(usernameRaw: string, style: { styleId?: string; name: string; text: string }): { styleId: string } {

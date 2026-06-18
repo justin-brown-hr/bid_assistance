@@ -8,6 +8,11 @@ import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
 import type { ClientProfileScrapeRequest, ClientProfileFilters } from "./types.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  exchangeSlackUserToken,
+  fetchSlackUserDisplayName,
+  sendSlackProjectLink,
+} from "./notify/slack.js";
 
 // Static assets served from src/dashboard-static/
 function dashboardStaticPath(relPath: string): string {
@@ -485,6 +490,44 @@ export class DashboardServer {
     return username;
   }
 
+  private signOAuthState(username: string): string {
+    const ts = Date.now();
+    const payload = `${username}.${ts}`;
+    const sig = crypto
+      .createHmac("sha256", cfg.dashboard.authSecret)
+      .update(`oauth:${payload}`)
+      .digest("base64url");
+    return `${payload}.${sig}`;
+  }
+
+  private verifyOAuthState(state: string | null): string | null {
+    if (!state) return null;
+    const parts = state.split(".");
+    if (parts.length !== 3) return null;
+    const [username, tsStr, sig] = parts;
+    const ts = Number(tsStr);
+    if (!username || !Number.isFinite(ts)) return null;
+    if (Date.now() - ts > 1000 * 60 * 10) return null;
+    const payload = `${username}.${tsStr}`;
+    const expected = crypto
+      .createHmac("sha256", cfg.dashboard.authSecret)
+      .update(`oauth:${payload}`)
+      .digest("base64url");
+    try {
+      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+    } catch {
+      return null;
+    }
+    return username;
+  }
+
+  private slackRedirectUri(req: http.IncomingMessage): string {
+    const host = req.headers.host ?? `localhost:${this.opts.port}`;
+    const forwarded = req.headers["x-forwarded-proto"];
+    const proto = typeof forwarded === "string" ? forwarded.split(",")[0]?.trim() || "http" : "http";
+    return `${proto}://${host}/api/slack/oauth/callback`;
+  }
+
   private async readJsonBody(req: http.IncomingMessage, maxBytes = 200_000): Promise<unknown> {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -583,6 +626,12 @@ export class DashboardServer {
 
       if (url.pathname === "/api/me") {
         const username = this.verifySession(req.headers.cookie);
+        if (username && this.db && !this.db.hasUser(username)) {
+          res.setHeader("set-cookie", ["dash_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"]);
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ ok: false, error: "Session expired — please sign in again" }));
+          return;
+        }
         res.setHeader("content-type", "application/json; charset=utf-8");
         res.end(JSON.stringify({ ok: true, username, isAdmin: this.isAdmin(username) }));
         return;
@@ -755,6 +804,155 @@ export class DashboardServer {
             res.statusCode = 400;
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/slack/oauth/start") {
+        const username = this.verifySession(req.headers.cookie);
+        if (!username) {
+          res.writeHead(302, { Location: "/#/signin" });
+          res.end();
+          return;
+        }
+        const clientId = cfg.slack.clientId?.trim();
+        if (!clientId) {
+          res.statusCode = 400;
+          res.setHeader("content-type", "text/plain; charset=utf-8");
+          res.end("SLACK_CLIENT_ID is not configured");
+          return;
+        }
+        const redirectUri = encodeURIComponent(this.slackRedirectUri(req));
+        const state = encodeURIComponent(this.signOAuthState(username));
+        const authUrl =
+          `https://slack.com/oauth/v2/authorize?client_id=${encodeURIComponent(clientId)}` +
+          `&user_scope=${encodeURIComponent("chat:write")}` +
+          `&redirect_uri=${redirectUri}&state=${state}`;
+        res.writeHead(302, { Location: authUrl });
+        res.end();
+        return;
+      }
+
+      if (url.pathname === "/api/slack/oauth/callback") {
+        (async () => {
+          const fail = (msg: string) => {
+            res.writeHead(302, {
+              Location: `/#/profile?slack_error=${encodeURIComponent(msg)}`,
+            });
+            res.end();
+          };
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const code = url.searchParams.get("code");
+            const state = url.searchParams.get("state");
+            const oauthUser = this.verifyOAuthState(state);
+            if (!oauthUser) throw new Error("Slack OAuth state expired — try again");
+            const sessionUser = this.verifySession(req.headers.cookie);
+            if (!sessionUser || sessionUser !== oauthUser) {
+              throw new Error("Dashboard session mismatch — sign in and connect Slack again");
+            }
+            const clientId = cfg.slack.clientId?.trim();
+            const clientSecret = cfg.slack.clientSecret?.trim();
+            if (!clientId || !clientSecret) {
+              throw new Error("SLACK_CLIENT_ID and SLACK_CLIENT_SECRET must be configured");
+            }
+            if (!code) throw new Error("Slack OAuth was cancelled");
+
+            const redirectUri = this.slackRedirectUri(req);
+            const oauth = await exchangeSlackUserToken({
+              clientId,
+              clientSecret,
+              code,
+              redirectUri,
+            });
+            const displayName =
+              (await fetchSlackUserDisplayName(oauth.userToken)) || oauth.userId;
+            this.db.upsertSlackConnection(oauthUser, {
+              userToken: oauth.userToken,
+              userId: oauth.userId,
+              displayName,
+            });
+            res.writeHead(302, { Location: "/#/profile?slack=connected" });
+            res.end();
+          } catch (e) {
+            fail(e instanceof Error ? e.message : String(e));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/slack/disconnect" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            this.db.clearSlackConnection(username);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/settings/slack" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            res.statusCode = 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: "Use Connect Slack in Profile — messages must be sent as your Slack user",
+              }),
+            );
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/slack" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            if (!cfg.slack.enabled) throw new Error("Slack is disabled");
+            const channelId = cfg.slack.channelId?.trim();
+            if (!channelId) throw new Error("SLACK_CHANNEL_ID is not configured");
+            const userToken = this.db.getSlackUserToken(username);
+            if (!userToken) {
+              throw new Error("Connect Slack in Profile first");
+            }
+            const body = (await this.readJsonBody(req)) as { project?: Project };
+            const project = body.project;
+            if (!project?.url?.trim()) throw new Error("Project URL is required");
+            await sendSlackProjectLink({
+              projectUrl: project.url,
+              userToken,
+              channelId,
+            });
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
           }
         })();
         return;
@@ -2079,6 +2277,14 @@ export class DashboardServer {
         min-width: 148px;
       }
       .listRowActions .btn, .listRowActions .btnPrimary { white-space: nowrap; }
+      .listRowActions .slackSendBtn {
+        white-space: normal;
+        max-width: 220px;
+        text-align: center;
+        line-height: 1.25;
+        font-size: 12px;
+        padding: 8px 10px;
+      }
       .listRowStats {
         width: 100%;
         display:flex;

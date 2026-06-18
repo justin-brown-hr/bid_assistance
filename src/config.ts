@@ -80,6 +80,14 @@ export const cfg = {
     openaiApiKey: getEnvOptional("OPENAI_API_KEY"),
     model: getEnvOptional("OPENAI_MODEL") ?? "gpt-4.1-mini",
   },
+  slack: {
+    enabled: (getEnvOptional("SLACK_ENABLED") ?? "true").toLowerCase() !== "false",
+    clientId: getEnvOptional("SLACK_CLIENT_ID"),
+    clientSecret: getEnvOptional("SLACK_CLIENT_SECRET"),
+    channelId: getEnvOptional("SLACK_CHANNEL_ID"),
+    botToken: getEnvOptional("SLACK_BOT_TOKEN"),
+    webhookUrl: getEnvOptional("SLACK_WEBHOOK_URL"),
+  },
 };
 
 export function assertStartupConfig() {
