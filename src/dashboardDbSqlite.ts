@@ -774,5 +774,21 @@ export class DashboardDbSqlite {
     const r = this.db.prepare("DELETE FROM client_profiles WHERE username = ?").run(username);
     if (r.changes === 0) throw new Error("Client profile not found");
   }
+
+  deleteClientProfiles(usernameRaws: string[]): number {
+    if (!this.db) throw new Error("DB not connected");
+    const usernames = [...new Set(usernameRaws.map((u) => this.normClientUsername(u)).filter(Boolean))];
+    if (usernames.length === 0) throw new Error("No client usernames provided");
+
+    const stmt = this.db.prepare("DELETE FROM client_profiles WHERE username = ?");
+    let deleted = 0;
+    const tx = this.db.transaction((names: string[]) => {
+      for (const name of names) {
+        deleted += stmt.run(name).changes;
+      }
+    });
+    tx(usernames);
+    return deleted;
+  }
 }
 

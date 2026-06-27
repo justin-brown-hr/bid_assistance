@@ -336,6 +336,15 @@
     await api("/api/client-profiles/" + encodeURIComponent(username), { method: "DELETE" });
   }
 
+  async function deleteClientProfilesBulk(usernames) {
+    const j = await api("/api/client-profiles/bulk-delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ usernames }),
+    });
+    return Number(j.deleted ?? 0);
+  }
+
   function formatDate(ms) {
     if (!ms) return "—";
     try {
@@ -965,7 +974,9 @@
   }
 
   let clientsPage = 1;
-  const CLIENTS_PAGE_SIZE = 20;
+  let clientsPageSize = 20;
+  let clientsTotalPages = 1;
+  const clientsSelected = new Set();
   let clientsFiltersOpen = false;
 
   const CLIENTS_FILTER_DEFAULTS = {
@@ -1009,7 +1020,7 @@
   function buildClientsApiUrl(page) {
     const p = new URLSearchParams();
     p.set("page", String(page));
-    p.set("limit", String(CLIENTS_PAGE_SIZE));
+    p.set("limit", String(clientsPageSize));
     const textKeys = [
       "q", "username", "name", "avatar", "profileTitle", "earning",
       "lastReviewDate", "country", "joinDate", "lastPostedProject",
@@ -1066,6 +1077,93 @@
       updatedFrom: get("cf_updatedFrom"),
       updatedTo: get("cf_updatedTo"),
     };
+  }
+
+  function renderClientsBulkBar() {
+    if (!isAdminUser()) return "";
+    return `
+      <div class="clientsBulkRow">
+        <label>
+          <input type="checkbox" id="clientsSelectAllPage" />
+          Select all on page
+        </label>
+        <button id="clientsDeleteSelected" class="btn navRowBtnDanger" type="button" disabled>Delete selected</button>
+        <span id="clientsSelectedCount" class="clientsBulkCount"></span>
+      </div>
+    `;
+  }
+
+  function updateClientsBulkUi() {
+    const deleteBtn = document.getElementById("clientsDeleteSelected");
+    const countEl = document.getElementById("clientsSelectedCount");
+    const selectAll = document.getElementById("clientsSelectAllPage");
+    const n = clientsSelected.size;
+    if (deleteBtn) deleteBtn.disabled = n === 0;
+    if (countEl) countEl.textContent = n ? `${n} selected` : "";
+    if (selectAll) {
+      const boxes = document.querySelectorAll(".clientSelectCb");
+      const checked = document.querySelectorAll(".clientSelectCb:checked");
+      selectAll.checked = boxes.length > 0 && checked.length === boxes.length;
+      selectAll.indeterminate = checked.length > 0 && checked.length < boxes.length;
+    }
+  }
+
+  function bindClientsBulkBar() {
+    document.getElementById("clientsSelectAllPage")?.addEventListener("change", (e) => {
+      const checked = e.target.checked;
+      document.querySelectorAll(".clientSelectCb").forEach((cb) => {
+        cb.checked = checked;
+        const username = cb.getAttribute("data-client-username") || "";
+        if (!username) return;
+        if (checked) clientsSelected.add(username);
+        else clientsSelected.delete(username);
+      });
+      updateClientsBulkUi();
+    });
+
+    document.getElementById("clientsDeleteSelected")?.addEventListener("click", async () => {
+      const usernames = [...clientsSelected];
+      if (!usernames.length) return;
+      if (!confirm(`Delete ${usernames.length} client profile${usernames.length === 1 ? "" : "s"}?`)) return;
+      const deleteBtn = document.getElementById("clientsDeleteSelected");
+      if (deleteBtn) {
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = "Deleting…";
+      }
+      try {
+        const deleted = await deleteClientProfilesBulk(usernames);
+        usernames.forEach((u) => clientsSelected.delete(u));
+        toast(`Deleted ${deleted} profile${deleted === 1 ? "" : "s"}`);
+        const gridEl = document.getElementById("clientsGrid");
+        const pagerEl = document.getElementById("clientsPager");
+        if (clientsPage > 1 && deleted >= usernames.length) {
+          const j = await api(buildClientsApiUrl(clientsPage));
+          if (!(j.profiles || []).length && clientsPage > 1) {
+            clientsPage -= 1;
+          }
+        }
+        await loadClientsResults(gridEl, pagerEl);
+      } catch (e) {
+        alert("Error: " + (e?.message || String(e)));
+        updateClientsBulkUi();
+      } finally {
+        if (deleteBtn) deleteBtn.textContent = "Delete selected";
+      }
+    });
+  }
+
+  function bindClientSelection(gridEl) {
+    if (!gridEl || !isAdminUser()) return;
+    gridEl.querySelectorAll(".clientSelectCb").forEach((cb) => {
+      const username = cb.getAttribute("data-client-username") || "";
+      cb.checked = clientsSelected.has(username);
+      cb.addEventListener("change", () => {
+        if (cb.checked) clientsSelected.add(username);
+        else clientsSelected.delete(username);
+        updateClientsBulkUi();
+      });
+    });
+    updateClientsBulkUi();
   }
 
   function clientsFilterField(id, label, type, placeholder) {
@@ -1171,25 +1269,66 @@
     try {
       const j = await api(buildClientsApiUrl(clientsPage));
       const profiles = j.profiles || [];
+      clientsTotalPages = Math.max(1, j.totalPages || 1);
+      if (clientsPage > clientsTotalPages) {
+        clientsPage = clientsTotalPages;
+        return loadClientsResults(gridEl, pagerEl);
+      }
+
       if (!profiles.length) {
         gridEl.innerHTML = `<div class="clientsEmpty muted">No profiles match your search.</div>`;
       } else {
         gridEl.innerHTML = profiles.map(renderClientCard).join("");
         bindClientDeleteButtons(gridEl);
+        bindClientSelection(gridEl);
       }
 
-      const totalPages = j.totalPages || 1;
+      const pageSizeOptions = [10, 20, 50, 100]
+        .map(
+          (n) =>
+            `<option value="${n}"${n === clientsPageSize ? " selected" : ""}>${n}</option>`,
+        )
+        .join("");
+
       pagerEl.innerHTML = `
         <button class="btn" type="button" id="clientsPrev" ${clientsPage <= 1 ? "disabled" : ""}>Previous</button>
-        <span class="paginationInfo">Page ${clientsPage} of ${totalPages} · ${j.total ?? 0} profiles</span>
-        <button class="btn" type="button" id="clientsNext" ${clientsPage >= totalPages ? "disabled" : ""}>Next</button>
+        <span class="paginationInfo">Page ${clientsPage} of ${clientsTotalPages} · ${j.total ?? 0} profiles</span>
+        <button class="btn" type="button" id="clientsNext" ${clientsPage >= clientsTotalPages ? "disabled" : ""}>Next</button>
+        <div class="paginationControls">
+          <label>
+            Per page
+            <select id="clientsPageSize">${pageSizeOptions}</select>
+          </label>
+          <label>
+            Go to
+            <input type="number" id="clientsGoPage" min="1" max="${clientsTotalPages}" value="${clientsPage}" />
+          </label>
+          <button class="btn" type="button" id="clientsGoPageBtn">Go</button>
+        </div>
       `;
+
       document.getElementById("clientsPrev")?.addEventListener("click", () => {
         if (clientsPage > 1) void renderClients(clientsPage - 1);
       });
       document.getElementById("clientsNext")?.addEventListener("click", () => {
-        if (clientsPage < totalPages) void renderClients(clientsPage + 1);
+        if (clientsPage < clientsTotalPages) void renderClients(clientsPage + 1);
       });
+      document.getElementById("clientsPageSize")?.addEventListener("change", (e) => {
+        clientsPageSize = Number(e.target.value) || 20;
+        void renderClients(1);
+      });
+      document.getElementById("clientsGoPageBtn")?.addEventListener("click", () => {
+        const raw = Number(document.getElementById("clientsGoPage")?.value);
+        if (!Number.isFinite(raw)) return;
+        const target = Math.min(clientsTotalPages, Math.max(1, Math.floor(raw)));
+        void renderClients(target);
+      });
+      document.getElementById("clientsGoPage")?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          document.getElementById("clientsGoPageBtn")?.click();
+        }
+      });
+      updateClientsBulkUi();
     } catch (e) {
       gridEl.innerHTML = `<div class="clientsEmpty">Error: ${esc(e?.message || String(e))}</div>`;
       pagerEl.innerHTML = "";
@@ -1305,12 +1444,20 @@
   }
 
   function renderClientCard(p) {
+    const username = String(p.username || "").trim().toLowerCase();
     const deleteBtn = isAdminUser()
-      ? `<button type="button" class="navRowBtn navRowBtnDanger clientCardDelete" data-delete-client="${esc(p.username)}" title="Delete profile">Delete</button>`
+      ? `<button type="button" class="navRowBtn navRowBtnDanger clientCardDelete" data-delete-client="${esc(username)}" title="Delete profile">Delete</button>`
       : "";
+    const selectCb = isAdminUser()
+      ? `<label class="clientCardSelect" title="Select profile">
+          <input type="checkbox" class="clientSelectCb" data-client-username="${esc(username)}" />
+        </label>`
+      : "";
+    const cardClass = isAdminUser() ? "clientCard clientCardHasSelect" : "clientCard";
 
     return `
-      <article class="clientCard">
+      <article class="${cardClass}">
+        ${selectCb}
         ${deleteBtn}
         ${renderClientProfilePanel(p)}
       </article>
@@ -1403,12 +1550,14 @@
           <div class="sub">Scraped employer profiles from new projects.</div>
         </div>
         ${renderClientsToolbar()}
+        ${renderClientsBulkBar()}
         <div id="clientsGrid" class="clientGrid"><div class="muted clientsLoading">Loading…</div></div>
         <div id="clientsPager" class="pagination"></div>
       </div>
     `);
 
     bindClientsToolbar();
+    bindClientsBulkBar();
     const gridEl = document.getElementById("clientsGrid");
     const pagerEl = document.getElementById("clientsPager");
     await loadClientsResults(gridEl, pagerEl);

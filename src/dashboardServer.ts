@@ -1079,6 +1079,26 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/client-profiles/bulk-delete" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const body = (await this.readJsonBody(req)) as { usernames?: string[] };
+            const usernames = Array.isArray(body.usernames) ? body.usernames : [];
+            const deleted = this.db.deleteClientProfiles(usernames);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, deleted }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname.startsWith("/api/client-profiles/") && req.method === "DELETE") {
         (async () => {
           try {
@@ -2127,6 +2147,67 @@ export class DashboardServer {
         gap: 10px;
         flex-wrap: wrap;
         margin-top: 14px;
+      }
+      .clientsBulkRow {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      .clientsBulkRow label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .clientsBulkCount { font-size: 13px; color: var(--muted); }
+      .clientCardSelect {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        z-index: 2;
+        display: inline-flex;
+        align-items: center;
+        cursor: pointer;
+      }
+      .clientCardSelect input {
+        width: 16px;
+        height: 16px;
+        cursor: pointer;
+        accent-color: var(--link);
+      }
+      .clientCardHasSelect .clientCardMain { padding-left: 22px; }
+      .paginationControls {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .paginationControls label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .paginationControls select,
+      .paginationControls input[type="number"] {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 6px 8px;
+        font-size: 13px;
+        background: var(--input);
+        color: var(--text);
+      }
+      .paginationControls input[type="number"] {
+        width: 64px;
       }
       .list { display:flex; flex-direction:column; gap:0; }
       .listFeed {
