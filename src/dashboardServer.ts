@@ -3,9 +3,8 @@ import type { FastDecision, Project } from "./types.js";
 import { cfg } from "./config.js";
 import {
   openRouterChatCompletion,
-  OPENROUTER_DEFAULT_MODEL,
-  normalizeBidModel,
 } from "./ai/openrouter.js";
+import { OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
 import crypto from "node:crypto";
 import { DashboardDbSqlite } from "./dashboardDbSqlite.js";
 import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
@@ -545,7 +544,7 @@ export class DashboardServer {
 
   private async generateBid(body: GenerateBidRequest): Promise<string> {
     if (!this.db) throw new Error("DB not ready");
-    const model = normalizeBidModel(body.model?.trim() || cfg.ai.openrouterModel || OPENROUTER_DEFAULT_MODEL);
+    const model = (body.model?.trim() || cfg.ai.openrouterModel || OPENROUTER_DEFAULT_MODEL).trim();
     const style = (body.style ?? "").trim();
     if (!style) throw new Error("Bid style is empty");
     const p = body.project;
@@ -788,6 +787,47 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/admin/bid-models" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const models = this.db.listBidModels();
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, models }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/admin/bid-models/") && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const suffix = url.pathname.slice("/api/admin/bid-models/".length);
+            if (!suffix.endsWith("/toggle")) throw new Error("Unknown action");
+            const id = Number(suffix.slice(0, -"/toggle".length));
+            if (!Number.isFinite(id)) throw new Error("Invalid model id");
+            const body = (await this.readJsonBody(req)) as { enabled?: boolean };
+            this.db.setBidModelEnabled(id, Boolean(body.enabled));
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, models: this.db.listBidModels() }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname === "/api/signin" && req.method === "POST") {
         (async () => {
           try {
@@ -873,26 +913,6 @@ export class DashboardServer {
             res.statusCode = 404;
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
-          }
-        })();
-        return;
-      }
-
-      if (url.pathname === "/api/settings/bid-model" && req.method === "POST") {
-        (async () => {
-          try {
-            if (!this.db) throw new Error("DB not ready");
-            const username = this.verifySession(req.headers.cookie);
-            if (!username) throw new Error("Not logged in");
-            const body = (await this.readJsonBody(req)) as { model?: string };
-            const model = this.db.setBidModel(username, String(body.model ?? ""));
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: true, model }));
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            res.statusCode = msg === "Not logged in" ? 401 : 400;
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: false, error: msg }));
           }
         })();
         return;
@@ -1099,7 +1119,12 @@ export class DashboardServer {
             if (!this.db) throw new Error("DB not ready");
             const username = this.verifySession(req.headers.cookie);
             if (!username) throw new Error("Not logged in");
-            const body = (await this.readJsonBody(req)) as { styleId?: string; name: string; text: string };
+            const body = (await this.readJsonBody(req)) as {
+              styleId?: string;
+              name: string;
+              text: string;
+              bidModel?: string;
+            };
             const r = this.db.upsertStyle(username, body);
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: true, styleId: r.styleId }));
@@ -1147,7 +1172,7 @@ export class DashboardServer {
             const style = this.db.getStyle(username, styleId);
             if (!style?.text?.trim()) throw new Error("Bid style is empty");
             const bid = await this.generateBid({
-              model: body.model?.trim() || this.db.getBidModel(username),
+              model: body.model?.trim() || style.bidModel,
               style: style.text,
               project: body.project,
             });
@@ -1169,7 +1194,7 @@ export class DashboardServer {
         (async () => {
           try {
             if (!this.db) throw new Error("DB not ready");
-            this.requireAdmin(req.headers.cookie);
+            if (!this.verifySession(req.headers.cookie)) throw new Error("Not logged in");
             const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
             const limit = Math.max(1, Number(url.searchParams.get("limit") ?? "20") || 20);
             const filters = parseClientProfileFilters(url.searchParams);
@@ -1729,6 +1754,10 @@ export class DashboardServer {
         flex: 1;
         min-height: 0;
         overflow: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+      .navTableShell .navTable {
+        min-width: 720px;
       }
       .navTable {
         width: 100%;
@@ -1769,6 +1798,21 @@ export class DashboardServer {
       .navTableRow:hover .navTableCell { background: var(--nav-row-hover); }
       .navColNum { width: 44px; text-align: center; color: var(--muted); font-family: ui-monospace, monospace; }
       .navColCenter { width: 72px; text-align: center; }
+      .navColStatus {
+        min-width: 100px;
+        width: 100px;
+        text-align: center;
+      }
+      .navTableCell.navColStatus,
+      .navTableHead.navColStatus {
+        overflow: visible;
+        white-space: normal;
+      }
+      .navTableCell.navColWrap {
+        overflow: visible;
+        white-space: normal;
+        word-break: break-word;
+      }
       .navColDate { width: 168px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
       .navColAction { width: 168px; text-align: center; }
       .navColRole { width: 96px; text-align: center; }
@@ -1784,6 +1828,7 @@ export class DashboardServer {
       }
       .navTableHead.navColNum,
       .navTableHead.navColCenter,
+      .navTableHead.navColStatus,
       .navTableHead.navColAction { text-align: center; }
       .navCellUser {
         font-weight: 600;
@@ -1804,12 +1849,15 @@ export class DashboardServer {
       }
       .navKeyPill {
         display: inline-block;
-        padding: 1px 8px;
+        padding: 2px 10px;
         font-size: 11px;
         font-weight: 600;
         font-family: ui-monospace, monospace;
         border-radius: 3px;
         border: 1px solid transparent;
+        white-space: nowrap;
+        line-height: 1.35;
+        vertical-align: middle;
       }
       .navKeyOk { color: #166534; background: #dcfce7; border-color: #86efac; }
       .navKeyNo { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
@@ -1862,7 +1910,10 @@ export class DashboardServer {
         overflow: auto;
         padding-bottom: 28px;
         box-sizing: border-box;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
       }
+      .profilePage::-webkit-scrollbar { width: 0; height: 0; }
       .profilePage h2 { margin: 0 0 16px; font-size: 18px; font-weight: 700; }
       .profileSplit {
         display: grid;

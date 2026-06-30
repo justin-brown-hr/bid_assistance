@@ -2,31 +2,7 @@ import crypto from "node:crypto";
 import OpenAI from "openai";
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-export const OPENROUTER_DEFAULT_MODEL = "openai/gpt-4.1-mini";
-
-export const BID_MODEL_OPTIONS = [
-  "openai/gpt-4o-mini",
-  "openai/gpt-4.1-mini",
-  "openai/gpt-5-nano",
-  "openai/gpt-4.1-nano",
-  "deepseek/deepseek-v3.2",
-] as const;
-
-export type BidModel = (typeof BID_MODEL_OPTIONS)[number];
-
-export function normalizeBidModel(model: string | null | undefined): BidModel {
-  const m = (model || "").trim();
-  if ((BID_MODEL_OPTIONS as readonly string[]).includes(m)) return m as BidModel;
-  return OPENROUTER_DEFAULT_MODEL;
-}
-
-export function assertBidModel(modelRaw: string): BidModel {
-  const m = modelRaw.trim();
-  if (!(BID_MODEL_OPTIONS as readonly string[]).includes(m)) {
-    throw new Error("Invalid bid model");
-  }
-  return m as BidModel;
-}
+export { OPENROUTER_DEFAULT_MODEL } from "./bidModels.js";
 
 export type OpenRouterKeyRow = {
   id: number;

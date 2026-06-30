@@ -201,9 +201,8 @@
     const clientsLink = document.getElementById("headerClientsLink");
     projectsLink?.classList.toggle("headerNavLinkActive", r === "/app");
     if (clientsLink) {
-      const showClients = isAdminUser();
-      clientsLink.classList.toggle("hidden", !showClients);
-      clientsLink.classList.toggle("headerNavLinkActive", showClients && r === "/clients");
+      clientsLink.classList.remove("hidden");
+      clientsLink.classList.toggle("headerNavLinkActive", r === "/clients");
     }
   }
 
@@ -447,7 +446,7 @@
           <tr class="navTableRow">
             <td class="navTableCell navColNum">${i + 1}</td>
             <td class="navTableCell"><code>${esc(k.masked)}</code></td>
-            <td class="navTableCell">
+            <td class="navTableCell navColStatus">
               <span class="navKeyPill ${statusClass}">${statusLabel}</span>
             </td>
             <td class="navTableCell navColDate muted" title="${esc(k.lastError || "")}">${err}</td>
@@ -581,15 +580,113 @@
     }
   }
 
+  function renderBidModelsTable(models) {
+    if (!models.length) {
+      return `<div class="navTableEmpty">No models in catalog.</div>`;
+    }
+    const rows = models
+      .map((m, i) => {
+        const statusClass = m.enabled ? "navKeyOk" : "navKeyExhausted";
+        const statusLabel = m.enabled ? "enabled" : "disabled";
+        const actionLabel = m.enabled ? "Disable" : "Enable";
+        return `
+          <tr class="navTableRow">
+            <td class="navTableCell navColNum">${i + 1}</td>
+            <td class="navTableCell"><span class="navCellTag">${esc(m.type)}</span></td>
+            <td class="navTableCell navColWrap">
+              <span class="navCellUser">${esc(m.displayName)}</span>
+              <div class="muted" style="font-size:11px;margin-top:2px;"><code>${esc(m.modelId)}</code></div>
+            </td>
+            <td class="navTableCell navColStatus">
+              <span class="navKeyPill ${statusClass}">${statusLabel}</span>
+            </td>
+            <td class="navTableCell navColAction">
+              <button type="button" class="navRowBtn" data-toggle-model="${m.id}" data-next-enabled="${m.enabled ? "0" : "1"}">${actionLabel}</button>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const enabledCount = models.filter((m) => m.enabled).length;
+    return `
+      <div class="navTableShell">
+        <div class="navTableToolbar">
+          <div class="navTableToolbarLeft">
+            <span class="navTableIcon" aria-hidden="true">◇</span>
+            <span class="navTableName">bid_models</span>
+          </div>
+          <div class="navTableToolbarRight">
+            <span class="navTableCount">${enabledCount}/${models.length} enabled for users</span>
+            <button type="button" class="navToolbarBtn" id="bidModelsRefreshBtn" title="Refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="navTableViewport">
+          <table class="navTable">
+            <thead>
+              <tr>
+                <th class="navTableHead navColNum">#</th>
+                <th class="navTableHead">type</th>
+                <th class="navTableHead">model name</th>
+                <th class="navTableHead navColStatus">status</th>
+                <th class="navTableHead navColAction">action</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  async function loadBidModelsPanel() {
+    const host = document.getElementById("adminBidModels");
+    if (!host || !isAdminUser()) return;
+    host.textContent = "Loading…";
+    try {
+      const j = await api("/api/admin/bid-models");
+      host.innerHTML = renderBidModelsTable(j.models || []);
+      document.getElementById("bidModelsRefreshBtn")?.addEventListener("click", () => void loadBidModelsPanel());
+      host.querySelectorAll("[data-toggle-model]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-toggle-model");
+          const enabled = btn.getAttribute("data-next-enabled") === "1";
+          if (!id) return;
+          const label = enabled ? "enable" : "disable";
+          if (!confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} this model for users?`)) return;
+          btn.disabled = true;
+          try {
+            await api("/api/admin/bid-models/" + encodeURIComponent(id) + "/toggle", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ enabled }),
+            });
+            toast(`Model ${enabled ? "enabled" : "disabled"}`);
+            await loadBidModelsPanel();
+            await loadSettings();
+          } catch (e) {
+            toast("Error: " + (e?.message || String(e)));
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (e) {
+      host.textContent = "Error: " + (e?.message || String(e));
+    }
+  }
+
   function switchAdminTab(tab) {
-    adminTab = tab === "keys" ? "keys" : "users";
+    adminTab = tab === "keys" ? "keys" : tab === "models" ? "models" : "users";
     document.querySelectorAll(".adminTab").forEach((btn) => {
       btn.classList.toggle("adminTabActive", btn.getAttribute("data-tab") === adminTab);
     });
     document.getElementById("adminTabUsers")?.classList.toggle("hidden", adminTab !== "users");
     document.getElementById("adminTabKeys")?.classList.toggle("hidden", adminTab !== "keys");
+    document.getElementById("adminTabModels")?.classList.toggle("hidden", adminTab !== "models");
     if (adminTab === "users") void mountAdminUsersPanel();
-    else void loadOpenRouterKeysPanel();
+    else if (adminTab === "keys") void loadOpenRouterKeysPanel();
+    else void loadBidModelsPanel();
   }
 
   async function mountAdminUsersPanel() {
@@ -774,6 +871,12 @@
           <input id="modalStyleName" type="text" placeholder="e.g. Friendly short bid" />
         </div>
         <div class="field">
+          <div class="label">Model</div>
+          <select id="modalStyleModel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
+            ${renderBidModelOptions()}
+          </select>
+        </div>
+        <div class="field">
           <div class="label">Text</div>
           <textarea id="modalStyleText" class="profileStyleText" placeholder="Paste or write your bid style instructions…"></textarea>
         </div>
@@ -794,6 +897,7 @@
     document.getElementById("modalCreateStyle")?.addEventListener("click", async () => {
       const name = (document.getElementById("modalStyleName")?.value || "").trim();
       const text = document.getElementById("modalStyleText")?.value || "";
+      const bidModel = document.getElementById("modalStyleModel")?.value || "";
       const createBtn = document.getElementById("modalCreateStyle");
 
       if (!name) {
@@ -817,7 +921,7 @@
         await api("/api/settings/styles", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name, text }),
+          body: JSON.stringify({ name, text, bidModel }),
         });
         await loadSettings();
         close();
@@ -926,13 +1030,18 @@
         <div class="adminTabs">
           <button type="button" class="adminTab ${adminTab === "users" ? "adminTabActive" : ""}" data-tab="users">Users</button>
           <button type="button" class="adminTab ${adminTab === "keys" ? "adminTabActive" : ""}" data-tab="keys">API Keys</button>
+          <button type="button" class="adminTab ${adminTab === "models" ? "adminTabActive" : ""}" data-tab="models">Models</button>
         </div>
         <div id="adminTabUsers" class="adminTabPanel${adminTab === "users" ? "" : " hidden"}">
           <div id="adminUserList" class="adminTableHost">Loading…</div>
         </div>
         <div id="adminTabKeys" class="adminTabPanel${adminTab === "keys" ? "" : " hidden"}">
-          <p class="adminPageSub" style="margin-bottom:12px;">Shared keys for bid generation via OpenRouter · users pick model on Profile</p>
+          <p class="adminPageSub" style="margin-bottom:12px;">Shared OpenRouter API keys for bid generation</p>
           <div id="adminOpenrouterKeys" class="adminTableHost">Loading…</div>
+        </div>
+        <div id="adminTabModels" class="adminTabPanel${adminTab === "models" ? "" : " hidden"}">
+          <p class="adminPageSub" style="margin-bottom:12px;">Enable or disable models shown to users on bid styles</p>
+          <div id="adminBidModels" class="adminTableHost">Loading…</div>
         </div>
       </div>
     `);
@@ -943,16 +1052,17 @@
   }
 
   function renderBidModelOptions(selected) {
-    const models = settings?.bidModelOptions || [
-      "openai/gpt-4o-mini",
-      "openai/gpt-4.1-mini",
-      "openai/gpt-5-nano",
-      "openai/gpt-4.1-nano",
-      "deepseek/deepseek-v3.2",
-    ];
-    const cur = selected || settings?.bidModel || "openai/gpt-4.1-mini";
+    const models = settings?.bidModelOptions || [];
+    const cur = selected || settings?.defaultBidModel || "openai/gpt-4.1-mini";
+    if (!models.length) {
+      return `<option value="${esc(cur)}" selected>${esc(cur)}</option>`;
+    }
     return models
-      .map((m) => `<option value="${esc(m)}"${m === cur ? " selected" : ""}>${esc(m)}</option>`)
+      .map((m) => {
+        const id = m.modelId || m;
+        const label = m.displayName ? `${m.displayName}` : id;
+        return `<option value="${esc(id)}"${id === cur ? " selected" : ""}>${esc(label)}</option>`;
+      })
       .join("");
   }
 
@@ -985,18 +1095,6 @@
             </div>
 
             <div class="card" style="margin-top:12px;">
-              <div class="metaRow"><span><b>Bid model</b></span></div>
-              <div class="sub muted">OpenRouter model used when you generate bids.</div>
-              <div class="field">
-                <div class="label">Model</div>
-                <select id="bidModelSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
-                  ${renderBidModelOptions()}
-                </select>
-              </div>
-              <div id="bidModelMsg" class="resultMeta"></div>
-            </div>
-
-            <div class="card" style="margin-top:12px;">
               <div class="metaRow"><span><b>Change passcode</b></span></div>
               <div class="field"><div class="label">Current passcode</div><input id="pwCur" type="password" autocomplete="current-password" /></div>
               <div class="field"><div class="label">New passcode</div><input id="pwNew" type="password" autocomplete="new-password" /></div>
@@ -1009,12 +1107,18 @@
           <div class="profileCol">
             <div class="card">
               <div class="metaRow"><span><b>Bid styles</b></span></div>
-              <div class="sub muted">${settings?.aiAvailable ? "AI bids available via shared OpenRouter keys." : "No active API keys — ask admin."}</div>
+              <div class="sub muted">${settings?.aiAvailable ? "Each style has its own AI model." : "No active API keys — ask admin."}</div>
               <div class="field">
                 <div class="label">Select</div>
                 <select id="styleSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
                   <option value="">Select style…</option>
                   ${styles.map((s) => `<option value="${esc(s.styleId)}">${esc(s.name)}</option>`).join("")}
+                </select>
+              </div>
+              <div class="field">
+                <div class="label">Model</div>
+                <select id="styleModelSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
+                  ${renderBidModelOptions()}
                 </select>
               </div>
               <div class="field"><div class="label">Name</div><input id="sn" type="text" placeholder="Style name" /></div>
@@ -1080,35 +1184,6 @@
       window.location.href = "/api/slack/oauth/start";
     });
 
-    document.getElementById("bidModelSel")?.addEventListener("focus", (ev) => {
-      ev.target.dataset.prevModel = ev.target.value;
-    });
-    document.getElementById("bidModelSel")?.addEventListener("change", async (ev) => {
-      const sel = ev.target;
-      const model = sel.value || "";
-      const prev = sel.dataset.prevModel || settings?.bidModel || "openai/gpt-4.1-mini";
-      const msgEl = document.getElementById("bidModelMsg");
-      sel.disabled = true;
-      try {
-        const j = await api("/api/settings/bid-model", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model }),
-        });
-        settings = { ...(settings || {}), bidModel: j.model || model };
-        sel.dataset.prevModel = j.model || model;
-        if (msgEl) msgEl.textContent = "Model saved.";
-        toast("Bid model saved");
-      } catch (e) {
-        sel.value = prev;
-        const errMsg = e?.message || String(e);
-        if (msgEl) msgEl.textContent = "Error: " + errMsg;
-        toast("Error: " + errMsg);
-      } finally {
-        sel.disabled = false;
-      }
-    });
-
     document.getElementById("disconnectSlack")?.addEventListener("click", async () => {
       const slackmsg = document.getElementById("slackmsg");
       try {
@@ -1153,6 +1228,8 @@
       if (!curStyleId) {
         document.getElementById("sn").value = "";
         document.getElementById("st").value = "";
+        const modelSel = document.getElementById("styleModelSel");
+        if (modelSel) modelSel.innerHTML = renderBidModelOptions();
         return;
       }
       const smsg = document.getElementById("smsg");
@@ -1160,6 +1237,10 @@
         const j = await api("/api/settings/styles/" + encodeURIComponent(curStyleId));
         document.getElementById("sn").value = j.style.name || "";
         document.getElementById("st").value = j.style.text || "";
+        const modelSel = document.getElementById("styleModelSel");
+        if (modelSel) {
+          modelSel.innerHTML = renderBidModelOptions(j.style.bidModel || "");
+        }
       } catch (e) {
         if (smsg) smsg.textContent = "Error: " + (e?.message || String(e));
       }
@@ -1176,6 +1257,7 @@
       }
       const name = (document.getElementById("sn")?.value || "").trim();
       const text = document.getElementById("st")?.value || "";
+      const bidModel = document.getElementById("styleModelSel")?.value || "";
       const smsg = document.getElementById("smsg");
       const updateBtn = document.getElementById("saveS");
 
@@ -1200,7 +1282,7 @@
         await api("/api/settings/styles", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ styleId: curStyleId, name, text }),
+          body: JSON.stringify({ styleId: curStyleId, name, text, bidModel }),
         });
         await loadSettings();
         alert("Bid style updated.");
@@ -1796,10 +1878,6 @@
   }
 
   async function renderClients(page) {
-    if (!isAdminUser()) {
-      nav("/app");
-      return;
-    }
     if (page) clientsPage = page;
     setMainLayout("clients");
     updateHeaderSession();
