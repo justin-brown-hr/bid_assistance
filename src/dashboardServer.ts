@@ -3,6 +3,7 @@ import type { FastDecision, Project } from "./types.js";
 import { cfg } from "./config.js";
 import {
   openRouterChatCompletion,
+  fetchOpenRouterModelIds,
 } from "./ai/openrouter.js";
 import { OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
 import crypto from "node:crypto";
@@ -607,6 +608,8 @@ export class DashboardServer {
       console.error("[dashboard] SQLite init failed:", e);
     }
 
+    void this.syncBidModelsFromOpenRouter();
+
     this.server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname === "/app.js") {
@@ -792,6 +795,7 @@ export class DashboardServer {
           try {
             if (!this.db) throw new Error("DB not ready");
             this.requireAdmin(req.headers.cookie);
+            await this.syncBidModelsFromOpenRouter();
             const models = this.db.listBidModels();
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: true, models }));
@@ -1341,6 +1345,19 @@ export class DashboardServer {
         console.log(`[dashboard] ${cfg.dashboard.bindInfo}`);
       }
     });
+  }
+
+  private async syncBidModelsFromOpenRouter(): Promise<void> {
+    if (!this.db) return;
+    try {
+      const ids = await fetchOpenRouterModelIds(cfg.ai.openrouterBaseUrl);
+      const result = this.db.syncBidModelsCatalog(ids);
+      if (result.removed > 0) {
+        console.log(`[dashboard] Removed ${result.removed} unavailable bid model(s) from catalog`);
+      }
+    } catch (e) {
+      console.warn("[dashboard] Bid model sync with OpenRouter failed:", e instanceof Error ? e.message : e);
+    }
   }
 
   record(item: Omit<DashboardItem, "id">): void {

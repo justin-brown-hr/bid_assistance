@@ -40,6 +40,14 @@ export function createOpenRouterClient(apiKey: string, baseUrl = OPENROUTER_BASE
   });
 }
 
+export async function fetchOpenRouterModelIds(baseUrl = OPENROUTER_BASE_URL): Promise<Set<string>> {
+  const url = `${baseUrl.replace(/\/$/, "")}/models`;
+  const res = await fetch(url, { headers: { "User-Agent": "FreelancerHelper/1.0" } });
+  if (!res.ok) throw new Error(`OpenRouter models list failed: ${res.status}`);
+  const json = (await res.json()) as { data?: Array<{ id: string }> };
+  return new Set((json.data ?? []).map((m) => m.id));
+}
+
 export async function openRouterChatCompletion(opts: {
   store: OpenRouterKeyStore;
   model: string;

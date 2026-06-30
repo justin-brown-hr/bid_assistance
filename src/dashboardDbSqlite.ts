@@ -192,6 +192,50 @@ export class DashboardDbSqlite {
     tx(BID_MODEL_SEED);
   }
 
+  syncBidModelsCatalog(availableModelIds: Set<string>): { removed: number; kept: number } {
+    if (!this.db) throw new Error("DB not connected");
+    const validSeed = BID_MODEL_SEED.filter((s) => availableModelIds.has(s.modelId));
+    const validIds = new Set(validSeed.map((s) => s.modelId));
+
+    const existing = this.listBidModels();
+    let removed = 0;
+    for (const row of existing) {
+      if (!validIds.has(row.modelId)) {
+        this.db.prepare("DELETE FROM bid_models WHERE id = ?").run(row.id);
+        removed += 1;
+      }
+    }
+
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO bid_models(type, model_id, display_name, enabled, sort_order)
+      VALUES(?, ?, ?, ?, ?)
+    `);
+    const updateMeta = this.db.prepare(`
+      UPDATE bid_models SET type = ?, display_name = ?, sort_order = ? WHERE model_id = ?
+    `);
+    for (const row of validSeed) {
+      const ins = insert.run(row.type, row.modelId, row.displayName, row.enabled ? 1 : 0, row.sortOrder);
+      if (!ins.changes) {
+        updateMeta.run(row.type, row.displayName, row.sortOrder, row.modelId);
+      }
+    }
+
+    if (this.countEnabledBidModels() === 0) {
+      const fallback = validSeed.find((s) => s.modelId === OPENROUTER_DEFAULT_MODEL) ?? validSeed[0];
+      if (fallback) {
+        this.db.prepare("UPDATE bid_models SET enabled = 1 WHERE model_id = ?").run(fallback.modelId);
+      }
+    }
+
+    return { removed, kept: validSeed.length };
+  }
+
+  private countEnabledBidModels(): number {
+    if (!this.db) return 0;
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM bid_models WHERE enabled = 1").get() as { n: number };
+    return Number(row.n) || 0;
+  }
+
   close(): void {
     this.db?.close();
     this.db = null;
