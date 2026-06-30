@@ -15,6 +15,10 @@
   let settings = null;
   let isAdmin = false;
   let selectedStyleId = "";
+  let stylePickerMode = "dropdown";
+  let bidLanguage = "English";
+  const STYLE_PICKER_MODE_KEY = "fh_stylePickerMode";
+  const BID_LANGUAGE_KEY = "fh_bidLanguage";
   let selectedProjectId = "";
   let eventSource = null;
   let feedReady = false;
@@ -253,6 +257,128 @@
       message,
       confirmText: opts.confirmText ?? "OK",
       showCancel: false,
+    });
+  }
+
+  function loadStylePickerMode() {
+    try {
+      const v = localStorage.getItem(STYLE_PICKER_MODE_KEY);
+      if (v === "buttons" || v === "dropdown") stylePickerMode = v;
+    } catch {}
+  }
+
+  function saveStylePickerMode(mode) {
+    stylePickerMode = mode === "buttons" ? "buttons" : "dropdown";
+    try {
+      localStorage.setItem(STYLE_PICKER_MODE_KEY, stylePickerMode);
+    } catch {}
+  }
+
+  function syncStylePickerUi() {
+    const sel = document.getElementById("stylePick");
+    if (sel && selectedStyleId) sel.value = selectedStyleId;
+    document.querySelectorAll(".stylePickBtn").forEach((btn) => {
+      const id = btn.getAttribute("data-style-id") || "";
+      btn.classList.toggle("stylePickBtnActive", id === selectedStyleId);
+    });
+  }
+
+  function applyStylePickerMode(mode) {
+    saveStylePickerMode(mode);
+    const isButtons = stylePickerMode === "buttons";
+    document.getElementById("stylePickDropdown")?.classList.toggle("hidden", isButtons);
+    document.getElementById("stylePickButtons")?.classList.toggle("hidden", !isButtons);
+    document.querySelectorAll("[data-style-mode]").forEach((btn) => {
+      btn.classList.toggle("stylePickModeBtnActive", btn.getAttribute("data-style-mode") === stylePickerMode);
+    });
+    syncStylePickerUi();
+  }
+
+  function renderStylePickerField(styles) {
+    const isButtons = stylePickerMode === "buttons";
+    const btnRows = (styles || [])
+      .map(
+        (s) =>
+          `<button type="button" class="stylePickBtn${s.styleId === selectedStyleId ? " stylePickBtnActive" : ""}" data-style-id="${esc(s.styleId)}">${esc(s.name)}</button>`,
+      )
+      .join("");
+    return `
+      <div class="field stylePickField">
+        <div class="stylePickHeader">
+          <div class="label">Bid style</div>
+          <div class="stylePickModeToggle" role="group" aria-label="Bid style picker mode">
+            <button type="button" class="stylePickModeBtn${!isButtons ? " stylePickModeBtnActive" : ""}" data-style-mode="dropdown">Dropdown</button>
+            <button type="button" class="stylePickModeBtn${isButtons ? " stylePickModeBtnActive" : ""}" data-style-mode="buttons">Buttons</button>
+          </div>
+        </div>
+        <div id="stylePickDropdown" class="stylePickDropdown${isButtons ? " hidden" : ""}">
+          <select id="stylePick" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
+            <option value="">Select style…</option>
+            ${(styles || []).map((s) => `<option value="${esc(s.styleId)}"${s.styleId === selectedStyleId ? " selected" : ""}>${esc(s.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div id="stylePickButtons" class="stylePickButtons${isButtons ? "" : " hidden"}">
+          ${btnRows || `<div class="muted stylePickEmpty">No bid styles — add one on Profile.</div>`}
+        </div>
+      </div>
+    `;
+  }
+
+  function bindStylePicker() {
+    document.querySelectorAll("[data-style-mode]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        applyStylePickerMode(btn.getAttribute("data-style-mode") || "dropdown");
+      });
+    });
+    document.getElementById("stylePick")?.addEventListener("change", (ev) => {
+      selectedStyleId = ev.currentTarget?.value || ev.target?.value || "";
+      syncStylePickerUi();
+    });
+    document.getElementById("stylePickButtons")?.addEventListener("click", (ev) => {
+      const btn = ev.target.closest?.("[data-style-id]");
+      if (!btn) return;
+      selectedStyleId = btn.getAttribute("data-style-id") || "";
+      syncStylePickerUi();
+    });
+  }
+
+  function loadBidLanguage() {
+    try {
+      const v = localStorage.getItem(BID_LANGUAGE_KEY);
+      if (v) bidLanguage = v;
+    } catch {}
+    bidLanguage = bidLanguage || settings?.defaultBidLanguage || "English";
+  }
+
+  function saveBidLanguage(lang) {
+    bidLanguage = lang || settings?.defaultBidLanguage || "English";
+    try {
+      localStorage.setItem(BID_LANGUAGE_KEY, bidLanguage);
+    } catch {}
+  }
+
+  function getSelectedBidLanguage() {
+    const el = document.getElementById("bidLanguage");
+    const v = (el?.value || bidLanguage || settings?.defaultBidLanguage || "English").trim();
+    return v || "English";
+  }
+
+  function renderBidLanguageField() {
+    const langs = settings?.bidLanguageOptions || ["English"];
+    const cur = bidLanguage || settings?.defaultBidLanguage || "English";
+    return `
+      <div class="field">
+        <div class="label">Bid language</div>
+        <select id="bidLanguage" class="bidLanguageSelect">
+          ${langs.map((lang) => `<option value="${esc(lang)}"${lang === cur ? " selected" : ""}>${esc(lang)}</option>`).join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  function bindBidLanguage() {
+    document.getElementById("bidLanguage")?.addEventListener("change", (ev) => {
+      saveBidLanguage(ev.currentTarget?.value || ev.target?.value || "English");
     });
   }
 
@@ -893,15 +1019,18 @@
   }
 
   async function generateBidForProject(project) {
-    // Always read latest selection from the DOM to avoid stale state
     const stylePickEl = document.getElementById("stylePick");
-    const liveStyleId = (stylePickEl && stylePickEl.value) ? stylePickEl.value : selectedStyleId;
-    selectedStyleId = liveStyleId || "";
+    const fromSelect = stylePickEl?.value || "";
+    if (fromSelect) selectedStyleId = fromSelect;
     if (!selectedStyleId) throw new Error("Select a bid style first");
     const j = await api("/api/bid", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ project, styleId: selectedStyleId }),
+      body: JSON.stringify({
+        project,
+        styleId: selectedStyleId,
+        language: getSelectedBidLanguage(),
+      }),
     });
     return String(j.bid || "");
   }
@@ -2333,6 +2462,8 @@
   function renderApp() {
     setMainLayout("default");
     updateHeaderSession();
+    loadStylePickerMode();
+    loadBidLanguage();
     const styles = settings?.styles || [];
     render(`
       <div class="layout">
@@ -2347,13 +2478,8 @@
         </div>
         <aside class="panel panelScroll pane">
           <h2>Main</h2>
-          <div class="field">
-            <div class="label">Bid style</div>
-            <select id="stylePick" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
-              <option value="">Select style…</option>
-              ${styles.map((s) => `<option value="${esc(s.styleId)}">${esc(s.name)}</option>`).join("")}
-            </select>
-          </div>
+          ${renderStylePickerField(styles)}
+          ${renderBidLanguageField()}
           <div class="field">
             <div class="label">Manual input (separate)</div>
             <textarea id="manualBox" placeholder="Paste project details here (no URL required)."></textarea>
@@ -2377,15 +2503,14 @@
       </div>
     `);
 
+    bindStylePicker();
+    bindBidLanguage();
+
     const listEl = document.getElementById("list");
     const bidOut = document.getElementById("bidOut");
     const copyBtn = document.getElementById("copyBid");
     const writeManualBtn = document.getElementById("writeBidManual");
     const manualBoxEl = document.getElementById("manualBox");
-
-    document.getElementById("stylePick")?.addEventListener("change", (ev) => {
-      selectedStyleId = ev.currentTarget?.value || ev.target?.value || "";
-    });
 
     copyBtn.addEventListener("click", async () => {
       await copyText(String(bidOut.textContent || ""));

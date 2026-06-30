@@ -6,6 +6,7 @@ import {
   fetchOpenRouterModelIds,
 } from "./ai/openrouter.js";
 import { OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
+import { BID_LANGUAGES, DEFAULT_BID_LANGUAGE, normalizeBidLanguage } from "./ai/bidLanguages.js";
 import crypto from "node:crypto";
 import { DashboardDbSqlite } from "./dashboardDbSqlite.js";
 import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
@@ -380,6 +381,7 @@ function getStaticAppJs(): string {
 
 type GenerateBidRequest = {
   model?: string;
+  language?: string;
   style: string;
   project: Project;
 };
@@ -550,10 +552,12 @@ export class DashboardServer {
     if (!style) throw new Error("Bid style is empty");
     const p = body.project;
     if (!p?.title) throw new Error("Invalid project payload");
+    const language = normalizeBidLanguage(body.language);
 
     const prompt = [
       "You are an expert freelancer writing a proposal (bid) for a Freelancer.com project.",
       "Write a concise, high-converting bid in plain text (no markdown).",
+      `Write the entire bid in ${language}. Use natural, professional ${language}.`,
       "Keep it under 1800 characters unless the style explicitly requests longer.",
       "Include a short greeting, 2-4 bullet points of relevant experience/plan, 1-2 clarifying questions, and a friendly call to action.",
       "Do not mention that you are an AI.",
@@ -889,6 +893,8 @@ export class DashboardServer {
             if (!username) throw new Error("Not logged in");
             const settings = {
               ...this.db.getUserSettings(username),
+              bidLanguageOptions: [...BID_LANGUAGES],
+              defaultBidLanguage: DEFAULT_BID_LANGUAGE,
               isAdmin: this.isAdmin(username),
             };
             res.setHeader("content-type", "application/json; charset=utf-8");
@@ -1170,6 +1176,7 @@ export class DashboardServer {
               project: Project;
               styleId?: string;
               model?: string;
+              language?: string;
             };
             const styleId = (body.styleId ?? "").trim();
             if (!styleId) throw new Error("Missing styleId");
@@ -1177,6 +1184,7 @@ export class DashboardServer {
             if (!style?.text?.trim()) throw new Error("Bid style is empty");
             const bid = await this.generateBid({
               model: body.model?.trim() || style.bidModel,
+              language: body.language,
               style: style.text,
               project: body.project,
             });
@@ -2137,6 +2145,80 @@ export class DashboardServer {
       .modalActions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
       input:focus, textarea:focus { border-color:#93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
       .panelActions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 12px; }
+      .stylePickField .label { margin: 0; }
+      .stylePickHeader {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .stylePickModeToggle {
+        display: inline-flex;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--input);
+      }
+      .stylePickModeBtn {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        padding: 6px 10px;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .stylePickModeBtn:hover { color: var(--text); background: var(--btnHover); }
+      .stylePickModeBtnActive {
+        color: var(--text);
+        background: var(--panel);
+        box-shadow: inset 0 0 0 1px var(--border);
+      }
+      .stylePickButtons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .stylePickDropdown.hidden,
+      .stylePickButtons.hidden {
+        display: none !important;
+      }
+      .stylePickBtn {
+        appearance: none;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--input);
+        color: var(--text);
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-family: inherit;
+        line-height: 1.2;
+        max-width: 100%;
+        text-align: left;
+      }
+      .stylePickBtn:hover { background: var(--btnHover); border-color: var(--accent); }
+      .stylePickBtnActive {
+        border-color: var(--accent);
+        background: rgba(50, 136, 255, 0.12);
+        color: var(--link);
+      }
+      .stylePickEmpty { font-size: 13px; padding: 4px 0; }
+      .bidLanguageSelect {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        font-size: 13px;
+        background: var(--input);
+        color: var(--text);
+        font-family: inherit;
+      }
       .btnPrimary {
         appearance:none; border:1px solid var(--accent); background:var(--accent); color:#fff;
         border-radius:8px; padding:9px 14px; font-size:15px; font-weight:600; cursor:pointer;

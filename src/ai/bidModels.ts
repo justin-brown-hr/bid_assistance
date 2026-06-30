@@ -20,6 +20,7 @@ export const BID_MODEL_SEED: BidModelSeed[] = [
   { type: "anthropic", modelId: "anthropic/claude-sonnet-4.5", displayName: "Claude Sonnet 4.5", enabled: true, sortOrder: 120 },
   { type: "anthropic", modelId: "anthropic/claude-sonnet-4.6", displayName: "Claude Sonnet 4.6", enabled: true, sortOrder: 130 },
   { type: "anthropic", modelId: "anthropic/claude-haiku-4.5", displayName: "Claude Haiku 4.5", enabled: true, sortOrder: 140 },
+  { type: "anthropic", modelId: "anthropic/claude-3-haiku", displayName: "Claude 3 Haiku", enabled: true, sortOrder: 145 },
   { type: "google", modelId: "google/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", enabled: true, sortOrder: 210 },
   { type: "google", modelId: "google/gemini-2.5-pro", displayName: "Gemini 2.5 Pro", enabled: true, sortOrder: 220 },
   { type: "google", modelId: "google/gemini-2.5-flash-lite", displayName: "Gemini 2.5 Flash Lite", enabled: true, sortOrder: 230 },
