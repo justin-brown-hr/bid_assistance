@@ -1,7 +1,11 @@
 import http from "node:http";
 import type { FastDecision, Project } from "./types.js";
 import { cfg } from "./config.js";
-import OpenAI from "openai";
+import {
+  openRouterChatCompletion,
+  OPENROUTER_DEFAULT_MODEL,
+  normalizeBidModel,
+} from "./ai/openrouter.js";
 import crypto from "node:crypto";
 import { DashboardDbSqlite } from "./dashboardDbSqlite.js";
 import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
@@ -375,7 +379,6 @@ function getStaticAppJs(): string {
 })();`; */
 
 type GenerateBidRequest = {
-  apiKey: string;
   model?: string;
   style: string;
   project: Project;
@@ -401,8 +404,6 @@ function escHtml(s: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
-
-const ADMIN_USERNAME = "riora";
 
 function parseOptionalNumber(raw: string | null): number | undefined {
   if (raw == null || raw.trim() === "") return undefined;
@@ -451,7 +452,8 @@ export class DashboardServer {
   constructor(private readonly opts: { port: number; maxItems?: number }) {}
 
   private isAdmin(username: string | null | undefined): boolean {
-    return Boolean(username && username.toLowerCase() === ADMIN_USERNAME);
+    if (!username || !this.db) return false;
+    return this.db.isUserAdmin(username);
   }
 
   private requireAdmin(cookie: string | undefined): string {
@@ -542,9 +544,8 @@ export class DashboardServer {
   }
 
   private async generateBid(body: GenerateBidRequest): Promise<string> {
-    const apiKey = body.apiKey?.trim();
-    if (!apiKey) throw new Error("Missing OpenAI API key");
-    const model = (body.model?.trim() || "gpt-4.1-mini");
+    if (!this.db) throw new Error("DB not ready");
+    const model = normalizeBidModel(body.model?.trim() || cfg.ai.openrouterModel || OPENROUTER_DEFAULT_MODEL);
     const style = (body.style ?? "").trim();
     if (!style) throw new Error("Bid style is empty");
     const p = body.project;
@@ -573,16 +574,13 @@ export class DashboardServer {
       `Description: ${p.description ?? "(none)"}`,
     ].join("\n");
 
-    const client = new OpenAI({ apiKey });
-    const resp = await client.chat.completions.create({
+    return openRouterChatCompletion({
+      store: this.db.createOpenRouterKeyStore(),
       model,
+      baseUrl: cfg.ai.openrouterBaseUrl,
       temperature: 0.3,
       messages: [{ role: "user", content: prompt }],
     });
-    const text = resp.choices[0]?.message?.content ?? "";
-    const trimmed = text.trim();
-    if (!trimmed) throw new Error("Empty bid generated");
-    return trimmed;
   }
 
   requestClientProfileScrape(req: ClientProfileScrapeRequest): void {
@@ -655,6 +653,40 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname.startsWith("/api/admin/users/") && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const suffix = url.pathname.slice("/api/admin/users/".length);
+            if (suffix.endsWith("/reset-password")) {
+              const target = decodeURIComponent(suffix.slice(0, -"/reset-password".length));
+              if (!target) throw new Error("Username required");
+              this.db.resetPassword(target, "password");
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.end(JSON.stringify({ ok: true, password: "password" }));
+              return;
+            }
+            if (suffix.endsWith("/role")) {
+              const target = decodeURIComponent(suffix.slice(0, -"/role".length));
+              if (!target) throw new Error("Username required");
+              const body = (await this.readJsonBody(req)) as { role?: string };
+              this.db.setUserRole(target, String(body.role || ""));
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.end(JSON.stringify({ ok: true, role: this.db.getUserRole(target) }));
+              return;
+            }
+            throw new Error("Unknown action");
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname.startsWith("/api/admin/users/") && req.method === "DELETE") {
         (async () => {
           try {
@@ -664,6 +696,88 @@ export class DashboardServer {
             this.db.deleteUser(target);
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: true }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/admin/openrouter-keys" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const keys = this.db.listOpenRouterKeys();
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, keys, activeCount: this.db.countActiveOpenRouterKeys() }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/admin/openrouter-keys" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const body = (await this.readJsonBody(req)) as { keys?: string };
+            const result = this.db.addOpenRouterKeys(String(body.keys ?? ""));
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, ...result, activeCount: this.db.countActiveOpenRouterKeys() }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/admin/openrouter-keys/") && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const suffix = url.pathname.slice("/api/admin/openrouter-keys/".length);
+            const id = Number(suffix.split("/")[0]);
+            if (!Number.isFinite(id)) throw new Error("Invalid key id");
+            if (suffix.endsWith("/reactivate")) {
+              this.db.reactivateOpenRouterKey(id);
+            } else {
+              throw new Error("Unknown action");
+            }
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, activeCount: this.db.countActiveOpenRouterKeys() }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/admin/openrouter-keys/") && req.method === "DELETE") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const id = Number(url.pathname.slice("/api/admin/openrouter-keys/".length));
+            if (!Number.isFinite(id)) throw new Error("Invalid key id");
+            this.db.deleteOpenRouterKey(id);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, activeCount: this.db.countActiveOpenRouterKeys() }));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
@@ -764,6 +878,26 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/settings/bid-model" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const body = (await this.readJsonBody(req)) as { model?: string };
+            const model = this.db.setBidModel(username, String(body.model ?? ""));
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, model }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname === "/api/settings/password" && req.method === "POST") {
         (async () => {
           try {
@@ -793,15 +927,16 @@ export class DashboardServer {
       if (url.pathname === "/api/settings/openai" && req.method === "POST") {
         (async () => {
           try {
-            if (!this.db) throw new Error("DB not ready");
             const username = this.verifySession(req.headers.cookie);
             if (!username) throw new Error("Not logged in");
-            const body = (await this.readJsonBody(req)) as { openaiKey: string };
-            this.db.upsertOpenAiKey(username, body.openaiKey);
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: true }));
-          } catch (e) {
             res.statusCode = 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({
+              ok: false,
+              error: "Per-user API keys are disabled — admin manages OpenRouter keys",
+            }));
+          } catch (e) {
+            res.statusCode = 401;
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
           }
@@ -1006,16 +1141,13 @@ export class DashboardServer {
               project: Project;
               styleId?: string;
               model?: string;
-              apiKey?: string;
             };
-            const apiKey = body.apiKey?.trim() || (this.db.getOpenAiKey(username) ?? "").trim();
             const styleId = (body.styleId ?? "").trim();
             if (!styleId) throw new Error("Missing styleId");
             const style = this.db.getStyle(username, styleId);
             if (!style?.text?.trim()) throw new Error("Bid style is empty");
             const bid = await this.generateBid({
-              apiKey,
-              model: body.model,
+              model: body.model?.trim() || this.db.getBidModel(username),
               style: style.text,
               project: body.project,
             });
@@ -1500,6 +1632,38 @@ export class DashboardServer {
       }
       .adminPageHeader h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
       .adminPageSub { margin: 0; font-size: 12px; color: var(--muted); }
+      .adminTabs {
+        display: flex;
+        gap: 8px;
+        flex-shrink: 0;
+        margin-bottom: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .adminTab {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 16px;
+        margin-bottom: -1px;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+      }
+      .adminTab:hover { color: var(--text); }
+      .adminTabActive {
+        color: var(--link);
+        border-bottom-color: var(--link);
+      }
+      .adminTabPanel {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .adminTabPanel.hidden { display: none; }
       .adminTableHost {
         flex: 1;
         min-height: 0;
@@ -1606,7 +1770,18 @@ export class DashboardServer {
       .navColNum { width: 44px; text-align: center; color: var(--muted); font-family: ui-monospace, monospace; }
       .navColCenter { width: 72px; text-align: center; }
       .navColDate { width: 168px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
-      .navColAction { width: 88px; text-align: center; }
+      .navColAction { width: 168px; text-align: center; }
+      .navColRole { width: 96px; text-align: center; }
+      .navRoleSelect {
+        width: 100%;
+        max-width: 88px;
+        padding: 4px 6px;
+        font-size: 12px;
+        border: 1px solid var(--nav-border);
+        border-radius: 4px;
+        background: var(--input);
+        color: var(--text);
+      }
       .navTableHead.navColNum,
       .navTableHead.navColCenter,
       .navTableHead.navColAction { text-align: center; }
@@ -1638,8 +1813,23 @@ export class DashboardServer {
       }
       .navKeyOk { color: #166534; background: #dcfce7; border-color: #86efac; }
       .navKeyNo { color: #991b1b; background: #fee2e2; border-color: #fca5a5; }
+      .navKeyExhausted { color: #92400e; background: #fef3c7; border-color: #fcd34d; }
       :root[data-theme="dark"] .navKeyOk { color: #86efac; background: rgba(22, 101, 52, 0.35); border-color: rgba(134, 239, 172, 0.4); }
       :root[data-theme="dark"] .navKeyNo { color: #fca5a5; background: rgba(153, 27, 27, 0.35); border-color: rgba(252, 165, 165, 0.35); }
+      :root[data-theme="dark"] .navKeyExhausted { color: #fcd34d; background: rgba(146, 64, 14, 0.35); border-color: rgba(252, 211, 77, 0.4); }
+      .openrouterKeysInput {
+        width: 100%;
+        min-height: 96px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 13px;
+        font-family: ui-monospace, monospace;
+        background: var(--input);
+        color: var(--text);
+        resize: vertical;
+      }
+      .adminOpenrouterSection { margin-bottom: 8px; }
       .navRowBtn {
         appearance: none;
         padding: 2px 10px;
@@ -1665,7 +1855,7 @@ export class DashboardServer {
         background: var(--nav-bg);
       }
       .profilePage {
-        max-width: 720px;
+        max-width: 1100px;
         margin: 0 auto;
         height: 100%;
         min-height: 0;
@@ -1674,6 +1864,16 @@ export class DashboardServer {
         box-sizing: border-box;
       }
       .profilePage h2 { margin: 0 0 16px; font-size: 18px; font-weight: 700; }
+      .profileSplit {
+        display: grid;
+        grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.2fr);
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 900px) {
+        .profileSplit { grid-template-columns: 1fr; }
+      }
+      .profileCol { min-width: 0; }
       .themeFab {
         position: fixed;
         right: 18px;

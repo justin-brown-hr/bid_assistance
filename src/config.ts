@@ -77,6 +77,8 @@ export const cfg = {
     authSecret: getEnvOptional("DASHBOARD_AUTH_SECRET") ?? "dev-secret-change-me",
   },
   ai: {
+    openrouterBaseUrl: getEnvOptional("OPENROUTER_BASE_URL") ?? "https://openrouter.ai/api/v1",
+    openrouterModel: getEnvOptional("OPENROUTER_MODEL") ?? "openai/gpt-4.1-mini",
     openaiApiKey: getEnvOptional("OPENAI_API_KEY"),
     model: getEnvOptional("OPENAI_MODEL") ?? "gpt-4.1-mini",
   },

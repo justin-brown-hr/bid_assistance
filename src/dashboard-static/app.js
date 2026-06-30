@@ -11,8 +11,6 @@
   const newProjectHighlights = new Set();
   const highlightTimers = new Map();
 
-  const ADMIN_USER = "riora";
-
   let me = null;
   let settings = null;
   let isAdmin = false;
@@ -239,7 +237,7 @@
   }
 
   function isAdminUser() {
-    return isAdmin || (me && me.toLowerCase() === ADMIN_USER);
+    return isAdmin === true;
   }
 
   function updateHeaderSession() {
@@ -247,8 +245,6 @@
       clearHeaderSession();
       return;
     }
-    const hasKey = settings?.hasOpenaiKey === true;
-    const keyClass = hasKey ? "keyBorderOk" : "keyBorderMissing";
     const admin = isAdminUser();
     headerSessionEl.classList.remove("hidden");
     headerSessionEl.innerHTML = `
@@ -261,7 +257,7 @@
             </button>`
               : ""
           }
-          <button type="button" class="headerUserBtn ${keyClass}" id="headerUserBtn" title="OpenAI key ${hasKey ? "saved" : "not saved"} — Profile" aria-label="Profile">
+          <button type="button" class="headerUserBtn" id="headerUserBtn" title="Profile" aria-label="Profile">
             ${userIconSvg()}
           </button>
           <button type="button" class="headerLogoutIcon" id="headerLogoutBtn" title="Logout" aria-label="Logout">
@@ -319,7 +315,7 @@
     const j = await api("/api/settings");
     settings = j.settings || null;
     me = settings ? settings.username : me;
-    isAdmin = settings?.isAdmin === true || (me && me.toLowerCase() === ADMIN_USER);
+    isAdmin = settings?.isAdmin === true;
     return settings;
   }
 
@@ -331,6 +327,24 @@
   async function deleteAdminUser(username) {
     await api("/api/admin/users/" + encodeURIComponent(username), { method: "DELETE" });
   }
+
+  async function resetAdminUserPassword(username) {
+    return api("/api/admin/users/" + encodeURIComponent(username) + "/reset-password", {
+      method: "POST",
+    });
+  }
+
+  async function setAdminUserRole(username, role) {
+    return api("/api/admin/users/" + encodeURIComponent(username) + "/role", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role }),
+    });
+  }
+
+  const DEFAULT_USER_PASSWORD = "password";
+
+  let adminTab = "users";
 
   async function deleteClientProfile(username) {
     await api("/api/client-profiles/" + encodeURIComponent(username), { method: "DELETE" });
@@ -360,8 +374,10 @@
     }
     const rows = users
       .map((u, i) => {
-        const isAdminAccount = u.username === ADMIN_USER;
-        const canDelete = u.username !== ADMIN_USER && u.username !== me;
+        const userRole = u.role === "admin" ? "admin" : "user";
+        const isAdminAccount = userRole === "admin";
+        const canDelete = u.username !== me;
+        const canReset = true;
         return `
           <tr class="navTableRow">
             <td class="navTableCell navColNum">${i + 1}</td>
@@ -369,12 +385,16 @@
               <span class="navCellUser">${esc(u.username)}</span>
               ${isAdminAccount ? '<span class="navCellTag">admin</span>' : ""}
             </td>
-            <td class="navTableCell">
-              <span class="navKeyPill ${u.hasOpenaiKey ? "navKeyOk" : "navKeyNo"}">${u.hasOpenaiKey ? "saved" : "missing"}</span>
+            <td class="navTableCell navColRole">
+              <select class="navRoleSelect" data-role-user="${esc(u.username)}" aria-label="Role for ${esc(u.username)}">
+                <option value="user"${userRole === "user" ? " selected" : ""}>user</option>
+                <option value="admin"${userRole === "admin" ? " selected" : ""}>admin</option>
+              </select>
             </td>
             <td class="navTableCell navColCenter">${u.styleCount}</td>
             <td class="navTableCell navColDate">${esc(formatDate(u.createdAt))}</td>
             <td class="navTableCell navColAction">
+              <button type="button" class="navRowBtn" data-reset-user="${esc(u.username)}" ${canReset ? "" : "disabled"} title="Reset password to ${DEFAULT_USER_PASSWORD}">Reset pwd</button>
               <button type="button" class="navRowBtn navRowBtnDanger" data-delete-user="${esc(u.username)}" ${canDelete ? "" : "disabled"} title="${canDelete ? "Delete user" : "Cannot delete"}">Delete</button>
             </td>
           </tr>
@@ -390,7 +410,7 @@
             <span class="navTableName">users</span>
           </div>
           <div class="navTableToolbarRight">
-            <span class="navTableCount">${users.length} row(s)</span>
+            <span class="navTableCount">${users.length} row(s) · default pwd: <code>${DEFAULT_USER_PASSWORD}</code></span>
             <button type="button" class="navToolbarBtn" id="adminRefreshBtn" title="Refresh">Refresh</button>
           </div>
         </div>
@@ -400,7 +420,7 @@
               <tr>
                 <th class="navTableHead navColNum">#</th>
                 <th class="navTableHead">username</th>
-                <th class="navTableHead">openai_key</th>
+                <th class="navTableHead navColRole">role</th>
                 <th class="navTableHead navColCenter">styles</th>
                 <th class="navTableHead">created_at</th>
                 <th class="navTableHead navColAction">actions</th>
@@ -413,31 +433,237 @@
     `;
   }
 
-  async function mountAdminPanel() {
-    const listEl = document.getElementById("adminUserList");
-    if (!listEl || !isAdminUser()) return;
-    listEl.textContent = "Loading…";
+  function renderOpenRouterKeysPanel(keys, activeCount) {
+    const rows = (keys || [])
+      .map((k, i) => {
+        const statusClass = k.status === "exhausted" ? "navKeyExhausted" : "navKeyOk";
+        const statusLabel = k.status === "exhausted" ? "run out" : "active";
+        const reactivateBtn =
+          k.status === "exhausted"
+            ? `<button type="button" class="navRowBtn" data-reactivate-or-key="${k.id}">Reactivate</button>`
+            : "";
+        const err = k.lastError ? esc(k.lastError.slice(0, 80)) : "—";
+        return `
+          <tr class="navTableRow">
+            <td class="navTableCell navColNum">${i + 1}</td>
+            <td class="navTableCell"><code>${esc(k.masked)}</code></td>
+            <td class="navTableCell">
+              <span class="navKeyPill ${statusClass}">${statusLabel}</span>
+            </td>
+            <td class="navTableCell navColDate muted" title="${esc(k.lastError || "")}">${err}</td>
+            <td class="navTableCell navColAction">
+              ${reactivateBtn}
+              <button type="button" class="navRowBtn navRowBtnDanger" data-delete-or-key="${k.id}">Delete</button>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    return `
+      <div class="adminOpenrouterSection">
+        <div class="card" style="margin-bottom:14px;">
+          <div class="field">
+            <div class="label">Add keys (one per line)</div>
+            <textarea id="openrouterKeysInput" class="openrouterKeysInput" placeholder="sk-or-v1-...&#10;sk-or-v1-..."></textarea>
+          </div>
+          <div class="panelActions">
+            <button type="button" class="btnPrimary" id="openrouterKeysAddBtn">Add keys</button>
+          </div>
+          <div id="openrouterKeysMsg" class="resultMeta"></div>
+        </div>
+        <div class="navTableShell">
+          <div class="navTableToolbar">
+            <div class="navTableToolbarLeft">
+              <span class="navTableIcon" aria-hidden="true">🔑</span>
+              <span class="navTableName">openrouter_keys</span>
+            </div>
+            <div class="navTableToolbarRight">
+              <span class="navTableCount">${(keys || []).length} key(s)</span>
+              <button type="button" class="navToolbarBtn" id="openrouterKeysRefreshBtn" title="Refresh">Refresh</button>
+            </div>
+          </div>
+          <div class="navTableViewport">
+            ${
+              rows
+                ? `<table class="navTable">
+              <thead>
+                <tr>
+                  <th class="navTableHead navColNum">#</th>
+                  <th class="navTableHead">key</th>
+                  <th class="navTableHead">status</th>
+                  <th class="navTableHead">last_error</th>
+                  <th class="navTableHead navColAction">actions</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>`
+                : `<div class="navTableEmpty">No API keys yet — paste keys above.</div>`
+            }
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async function loadOpenRouterKeysPanel() {
+    const host = document.getElementById("adminOpenrouterKeys");
+    if (!host || !isAdminUser()) return;
+    host.textContent = "Loading…";
     try {
-      const users = await loadAdminUsers();
-      listEl.innerHTML = renderAdminUserTable(users);
-      document.getElementById("adminRefreshBtn")?.addEventListener("click", () => void mountAdminPanel());
-      listEl.querySelectorAll("[data-delete-user]").forEach((btn) => {
+      const j = await api("/api/admin/openrouter-keys");
+      host.innerHTML = renderOpenRouterKeysPanel(j.keys || [], j.activeCount ?? 0);
+      document.getElementById("openrouterKeysRefreshBtn")?.addEventListener("click", () => void loadOpenRouterKeysPanel());
+      document.getElementById("openrouterKeysAddBtn")?.addEventListener("click", async () => {
+        const keys = document.getElementById("openrouterKeysInput")?.value || "";
+        const msgEl = document.getElementById("openrouterKeysMsg");
+        const btn = document.getElementById("openrouterKeysAddBtn");
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Adding…";
+        }
+        try {
+          const j = await api("/api/admin/openrouter-keys", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ keys }),
+          });
+          document.getElementById("openrouterKeysInput").value = "";
+          if (msgEl) {
+            msgEl.textContent = `Added ${j.added}, skipped ${j.skipped} duplicate(s). Active: ${j.activeCount}.`;
+          }
+          toast(`Added ${j.added} key(s)`);
+          await loadOpenRouterKeysPanel();
+          await loadSettings();
+        } catch (e) {
+          const errMsg = e?.message || String(e);
+          if (msgEl) msgEl.textContent = "Error: " + errMsg;
+          alert("Error: " + errMsg);
+        } finally {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = "Add keys";
+          }
+        }
+      });
+      host.querySelectorAll("[data-delete-or-key]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          const username = btn.getAttribute("data-delete-user") || "";
-          if (!username || username === ADMIN_USER || username === me) return;
-          if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+          const id = btn.getAttribute("data-delete-or-key");
+          if (!id || !confirm("Delete this API key?")) return;
           try {
-            await deleteAdminUser(username);
-            toast("User deleted");
-            await mountAdminPanel();
+            await api("/api/admin/openrouter-keys/" + encodeURIComponent(id), { method: "DELETE" });
+            toast("Key deleted");
+            await loadOpenRouterKeysPanel();
+            await loadSettings();
+          } catch (e) {
+            toast("Error: " + (e?.message || String(e)));
+          }
+        });
+      });
+      host.querySelectorAll("[data-reactivate-or-key]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-reactivate-or-key");
+          if (!id) return;
+          try {
+            await api("/api/admin/openrouter-keys/" + encodeURIComponent(id) + "/reactivate", {
+              method: "POST",
+            });
+            toast("Key reactivated");
+            await loadOpenRouterKeysPanel();
+            await loadSettings();
           } catch (e) {
             toast("Error: " + (e?.message || String(e)));
           }
         });
       });
     } catch (e) {
+      host.textContent = "Error: " + (e?.message || String(e));
+    }
+  }
+
+  function switchAdminTab(tab) {
+    adminTab = tab === "keys" ? "keys" : "users";
+    document.querySelectorAll(".adminTab").forEach((btn) => {
+      btn.classList.toggle("adminTabActive", btn.getAttribute("data-tab") === adminTab);
+    });
+    document.getElementById("adminTabUsers")?.classList.toggle("hidden", adminTab !== "users");
+    document.getElementById("adminTabKeys")?.classList.toggle("hidden", adminTab !== "keys");
+    if (adminTab === "users") void mountAdminUsersPanel();
+    else void loadOpenRouterKeysPanel();
+  }
+
+  async function mountAdminUsersPanel() {
+    const listEl = document.getElementById("adminUserList");
+    if (!listEl || !isAdminUser()) return;
+    listEl.textContent = "Loading…";
+    try {
+      const users = await loadAdminUsers();
+      listEl.innerHTML = renderAdminUserTable(users);
+      document.getElementById("adminRefreshBtn")?.addEventListener("click", () => void mountAdminUsersPanel());
+      listEl.querySelectorAll("[data-delete-user]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const username = btn.getAttribute("data-delete-user") || "";
+          if (!username || username === me) return;
+          if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+          try {
+            await deleteAdminUser(username);
+            toast("User deleted");
+            await mountAdminUsersPanel();
+          } catch (e) {
+            toast("Error: " + (e?.message || String(e)));
+          }
+        });
+      });
+      listEl.querySelectorAll("[data-reset-user]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const username = btn.getAttribute("data-reset-user") || "";
+          if (!username) return;
+          if (!confirm(`Reset password for "${username}" to "${DEFAULT_USER_PASSWORD}"?`)) return;
+          try {
+            await resetAdminUserPassword(username);
+            toast(`Password reset to "${DEFAULT_USER_PASSWORD}"`);
+          } catch (e) {
+            toast("Error: " + (e?.message || String(e)));
+          }
+        });
+      });
+      listEl.querySelectorAll("[data-role-user]").forEach((sel) => {
+        sel.addEventListener("focus", () => {
+          sel.dataset.prevRole = sel.value;
+        });
+        sel.addEventListener("change", async () => {
+          const username = sel.getAttribute("data-role-user") || "";
+          const role = sel.value === "admin" ? "admin" : "user";
+          const prev = sel.dataset.prevRole || (role === "admin" ? "user" : "admin");
+          if (!username) return;
+          if (!confirm(`Set role for "${username}" to "${role}"?`)) {
+            sel.value = prev;
+            return;
+          }
+          sel.disabled = true;
+          try {
+            await setAdminUserRole(username, role);
+            toast(`Role updated: ${username} → ${role}`);
+            if (username === me) {
+              isAdmin = role === "admin";
+              updateHeaderSession();
+            }
+            await mountAdminUsersPanel();
+          } catch (e) {
+            sel.value = prev;
+            toast("Error: " + (e?.message || String(e)));
+          } finally {
+            sel.disabled = false;
+          }
+        });
+      });
+    } catch (e) {
       listEl.textContent = "Error: " + (e?.message || String(e));
     }
+  }
+
+  async function mountAdminPanel() {
+    switchAdminTab(adminTab);
   }
 
   async function copyText(text) {
@@ -636,7 +862,7 @@
     render(`
       <div class="panel" style="max-width:520px; margin:18px auto; position:static;">
         <h2>${title}</h2>
-        <div class="sub">Each user has their own OpenAI key + bid styles.</div>
+        <div class="sub">Each user has their own bid styles.</div>
         <div class="field"><div class="label">Username</div><input id="u" type="text" /></div>
         <div class="field"><div class="label">Passcode</div><input id="p" type="password" /></div>
         <div class="panelActions">
@@ -694,75 +920,113 @@
     render(`
       <div class="adminPage">
         <div class="adminPageHeader">
-          <h2>User management</h2>
-          <p class="adminPageSub">Database-style user table · admin: <b>${esc(ADMIN_USER)}</b></p>
+          <h2>Admin</h2>
+          <p class="adminPageSub">Manage users and shared OpenRouter API keys</p>
         </div>
-        <div id="adminUserList" class="adminTableHost">Loading…</div>
+        <div class="adminTabs">
+          <button type="button" class="adminTab ${adminTab === "users" ? "adminTabActive" : ""}" data-tab="users">Users</button>
+          <button type="button" class="adminTab ${adminTab === "keys" ? "adminTabActive" : ""}" data-tab="keys">API Keys</button>
+        </div>
+        <div id="adminTabUsers" class="adminTabPanel${adminTab === "users" ? "" : " hidden"}">
+          <div id="adminUserList" class="adminTableHost">Loading…</div>
+        </div>
+        <div id="adminTabKeys" class="adminTabPanel${adminTab === "keys" ? "" : " hidden"}">
+          <p class="adminPageSub" style="margin-bottom:12px;">Shared keys for bid generation via OpenRouter · users pick model on Profile</p>
+          <div id="adminOpenrouterKeys" class="adminTableHost">Loading…</div>
+        </div>
       </div>
     `);
+    document.querySelectorAll(".adminTab").forEach((btn) => {
+      btn.addEventListener("click", () => switchAdminTab(btn.getAttribute("data-tab") || "users"));
+    });
     void mountAdminPanel();
+  }
+
+  function renderBidModelOptions(selected) {
+    const models = settings?.bidModelOptions || [
+      "openai/gpt-4o-mini",
+      "openai/gpt-4.1-mini",
+      "openai/gpt-5-nano",
+      "openai/gpt-4.1-nano",
+      "deepseek/deepseek-v3.2",
+    ];
+    const cur = selected || settings?.bidModel || "openai/gpt-4.1-mini";
+    return models
+      .map((m) => `<option value="${esc(m)}"${m === cur ? " selected" : ""}>${esc(m)}</option>`)
+      .join("");
   }
 
   function renderProfile() {
     setMainLayout("default");
     updateHeaderSession();
     const styles = settings?.styles || [];
-    const hasKey = settings?.hasOpenaiKey === true;
 
     render(`
       <div class="profilePage">
         <h2>Profile</h2>
-        <div class="card">
-          <div class="metaRow"><span><b>OpenAI key:</b> <span class="keyStatusRing ${hasKey ? "keyBorderOk" : "keyBorderMissing"}" title="${hasKey ? "Saved" : "Not saved"}"></span></span></div>
-          <div class="field"><div class="label">Set key</div><input id="key" type="password" placeholder="sk-..." /></div>
-          <div class="panelActions"><button id="saveKey" class="btnPrimary" type="button">Save key</button></div>
-          <div id="kmsg" class="resultMeta"></div>
-        </div>
+        <div class="profileSplit">
+          <div class="profileCol">
+            <div class="card">
+              <div class="metaRow"><span><b>Slack</b></span></div>
+              <div class="sub">Connect your Slack account once. Messages post as <b>you</b> in #Good Job.</div>
+              ${
+                settings?.hasSlackConnected
+                  ? `<div class="metaRow"><span>Connected as <b>@${esc((settings.slackUsername || "slack").replace(/^@+/, ""))}</b></span></div>`
+                  : `<div class="metaRow muted">Not connected</div>`
+              }
+              <div class="panelActions">
+                ${
+                  settings?.hasSlackConnected
+                    ? `<button id="disconnectSlack" class="btn" type="button">Disconnect Slack</button>`
+                    : `<button id="connectSlack" class="btnPrimary" type="button">Connect Slack</button>`
+                }
+              </div>
+              <div id="slackmsg" class="resultMeta"></div>
+            </div>
 
-        <div class="card" style="margin-top:12px;">
-          <div class="metaRow"><span><b>Slack</b></span></div>
-          <div class="sub">Connect your Slack account once. Messages post as <b>you</b> in #Good Job — you can delete them like normal Slack messages.</div>
-          ${
-            settings?.hasSlackConnected
-              ? `<div class="metaRow"><span>Connected as <b>@${esc((settings.slackUsername || "slack").replace(/^@+/, ""))}</b></span></div>`
-              : `<div class="metaRow muted">Not connected</div>`
-          }
-          <div class="panelActions">
-            ${
-              settings?.hasSlackConnected
-                ? `<button id="disconnectSlack" class="btn" type="button">Disconnect Slack</button>`
-                : `<button id="connectSlack" class="btnPrimary" type="button">Connect Slack</button>`
-            }
-          </div>
-          <div id="slackmsg" class="resultMeta"></div>
-        </div>
+            <div class="card" style="margin-top:12px;">
+              <div class="metaRow"><span><b>Bid model</b></span></div>
+              <div class="sub muted">OpenRouter model used when you generate bids.</div>
+              <div class="field">
+                <div class="label">Model</div>
+                <select id="bidModelSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
+                  ${renderBidModelOptions()}
+                </select>
+              </div>
+              <div id="bidModelMsg" class="resultMeta"></div>
+            </div>
 
-        <div class="card" style="margin-top:12px;">
-          <div class="metaRow"><span><b>Change passcode</b></span></div>
-          <div class="field"><div class="label">Current passcode</div><input id="pwCur" type="password" autocomplete="current-password" /></div>
-          <div class="field"><div class="label">New passcode</div><input id="pwNew" type="password" autocomplete="new-password" /></div>
-          <div class="field"><div class="label">Confirm new passcode</div><input id="pwConfirm" type="password" autocomplete="new-password" /></div>
-          <div class="panelActions"><button id="savePw" class="btnPrimary" type="button">Change passcode</button></div>
-          <div id="pwmsg" class="resultMeta"></div>
-        </div>
+            <div class="card" style="margin-top:12px;">
+              <div class="metaRow"><span><b>Change passcode</b></span></div>
+              <div class="field"><div class="label">Current passcode</div><input id="pwCur" type="password" autocomplete="current-password" /></div>
+              <div class="field"><div class="label">New passcode</div><input id="pwNew" type="password" autocomplete="new-password" /></div>
+              <div class="field"><div class="label">Confirm new passcode</div><input id="pwConfirm" type="password" autocomplete="new-password" /></div>
+              <div class="panelActions"><button id="savePw" class="btnPrimary" type="button">Change passcode</button></div>
+              <div id="pwmsg" class="resultMeta"></div>
+            </div>
+          </div>
 
-        <div class="card" style="margin-top:12px;">
-          <div class="metaRow"><span><b>Bid styles</b></span></div>
-          <div class="field">
-            <div class="label">Select</div>
-            <select id="styleSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
-              <option value="">Select style…</option>
-              ${styles.map((s) => `<option value="${esc(s.styleId)}">${esc(s.name)}</option>`).join("")}
-            </select>
+          <div class="profileCol">
+            <div class="card">
+              <div class="metaRow"><span><b>Bid styles</b></span></div>
+              <div class="sub muted">${settings?.aiAvailable ? "AI bids available via shared OpenRouter keys." : "No active API keys — ask admin."}</div>
+              <div class="field">
+                <div class="label">Select</div>
+                <select id="styleSel" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:10px; font-size:13px; background:var(--input); color:var(--text);">
+                  <option value="">Select style…</option>
+                  ${styles.map((s) => `<option value="${esc(s.styleId)}">${esc(s.name)}</option>`).join("")}
+                </select>
+              </div>
+              <div class="field"><div class="label">Name</div><input id="sn" type="text" placeholder="Style name" /></div>
+              <div class="field"><div class="label">Text</div><textarea id="st" class="profileStyleText" placeholder="Bid style instructions…"></textarea></div>
+              <div class="panelActions">
+                <button id="newS" class="btn" type="button">New</button>
+                <button id="saveS" class="btnPrimary" type="button" disabled>Update</button>
+                <button id="delS" class="btn" type="button" disabled>Delete</button>
+              </div>
+              <div id="smsg" class="resultMeta"></div>
+            </div>
           </div>
-          <div class="field"><div class="label">Name</div><input id="sn" type="text" placeholder="Style name" /></div>
-          <div class="field"><div class="label">Text</div><textarea id="st" class="profileStyleText" placeholder="Bid style instructions…"></textarea></div>
-          <div class="panelActions">
-            <button id="newS" class="btn" type="button">New</button>
-            <button id="saveS" class="btnPrimary" type="button" disabled>Update</button>
-            <button id="delS" class="btn" type="button" disabled>Delete</button>
-          </div>
-          <div id="smsg" class="resultMeta"></div>
         </div>
       </div>
     `);
@@ -816,6 +1080,35 @@
       window.location.href = "/api/slack/oauth/start";
     });
 
+    document.getElementById("bidModelSel")?.addEventListener("focus", (ev) => {
+      ev.target.dataset.prevModel = ev.target.value;
+    });
+    document.getElementById("bidModelSel")?.addEventListener("change", async (ev) => {
+      const sel = ev.target;
+      const model = sel.value || "";
+      const prev = sel.dataset.prevModel || settings?.bidModel || "openai/gpt-4.1-mini";
+      const msgEl = document.getElementById("bidModelMsg");
+      sel.disabled = true;
+      try {
+        const j = await api("/api/settings/bid-model", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model }),
+        });
+        settings = { ...(settings || {}), bidModel: j.model || model };
+        sel.dataset.prevModel = j.model || model;
+        if (msgEl) msgEl.textContent = "Model saved.";
+        toast("Bid model saved");
+      } catch (e) {
+        sel.value = prev;
+        const errMsg = e?.message || String(e);
+        if (msgEl) msgEl.textContent = "Error: " + errMsg;
+        toast("Error: " + errMsg);
+      } finally {
+        sel.disabled = false;
+      }
+    });
+
     document.getElementById("disconnectSlack")?.addEventListener("click", async () => {
       const slackmsg = document.getElementById("slackmsg");
       try {
@@ -843,39 +1136,6 @@
       if (slackmsg) slackmsg.textContent = "Error: " + slackErr;
       window.location.hash = "#/profile";
     }
-
-    document.getElementById("saveKey")?.addEventListener("click", async () => {
-      const openaiKey = document.getElementById("key")?.value || "";
-      const kmsg = document.getElementById("kmsg");
-      try {
-        await api("/api/settings/openai", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ openaiKey }),
-        });
-        await loadSettings();
-        updateHeaderSession();
-        const ok = settings?.hasOpenaiKey === true;
-        const keyClass = ok ? "keyBorderOk" : "keyBorderMissing";
-        const profileRing = document.querySelector(".profilePage .keyStatusRing");
-        if (profileRing) {
-          profileRing.className = "keyStatusRing " + keyClass;
-          profileRing.title = ok ? "Saved" : "Not saved";
-        }
-        const headerBtn = document.getElementById("headerUserBtn");
-        if (headerBtn) {
-          headerBtn.classList.remove("keyBorderOk", "keyBorderMissing");
-          headerBtn.classList.add(keyClass);
-          headerBtn.title = `OpenAI key ${ok ? "saved" : "not saved"} — Profile`;
-        }
-        if (kmsg) kmsg.textContent = "Saved.";
-        alert("OpenAI key saved.");
-      } catch (e) {
-        const errMsg = e?.message || String(e);
-        alert("Error: " + errMsg);
-        if (kmsg) kmsg.textContent = "Error: " + errMsg;
-      }
-    });
 
     let curStyleId = "";
 

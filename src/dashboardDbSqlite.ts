@@ -4,11 +4,13 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 import type { ClientProfile, ClientProfileFilters } from "./types.js";
+import { hashApiKey, maskApiKey, normalizeBidModel, assertBidModel, BID_MODEL_OPTIONS, type OpenRouterKeyStore } from "./ai/openrouter.js";
 
 export type UserRow = {
   username: string; // lowercased
   pass_hash: string;
   created_at: number;
+  role: "admin" | "user";
 };
 
 export type StyleRow = {
@@ -96,6 +98,19 @@ export class DashboardDbSqlite {
 
       CREATE INDEX IF NOT EXISTS idx_client_profiles_last_posted
         ON client_profiles(last_posted_time DESC);
+
+      CREATE TABLE IF NOT EXISTS openrouter_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_enc TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_openrouter_keys_status
+        ON openrouter_keys(status, updated_at DESC);
     `);
 
     try {
@@ -128,6 +143,17 @@ export class DashboardDbSqlite {
     }
     try {
       this.db.exec(`ALTER TABLE users ADD COLUMN slack_user_token_enc TEXT`);
+    } catch {
+      // column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`);
+    } catch {
+      // column already exists
+    }
+    this.db.exec(`UPDATE users SET role = 'admin' WHERE username = 'riora' AND (role IS NULL OR role = 'user')`);
+    try {
+      this.db.exec(`ALTER TABLE users ADD COLUMN bid_model TEXT`);
     } catch {
       // column already exists
     }
@@ -218,8 +244,8 @@ export class DashboardDbSqlite {
     }
 
     const now = Date.now();
-    this.db.prepare("INSERT INTO users(username, pass_hash, created_at) VALUES(?,?,?)")
-      .run(username, this.hashPassword(passcode), now);
+    this.db.prepare("INSERT INTO users(username, pass_hash, created_at, role) VALUES(?,?,?,?)")
+      .run(username, this.hashPassword(passcode), now, "user");
     return { username, created: true };
   }
 
@@ -235,8 +261,8 @@ export class DashboardDbSqlite {
     if (exists) throw new Error("User already exists");
 
     const now = Date.now();
-    this.db.prepare("INSERT INTO users(username, pass_hash, created_at) VALUES(?,?,?)")
-      .run(username, this.hashPassword(passcode), now);
+    this.db.prepare("INSERT INTO users(username, pass_hash, created_at, role) VALUES(?,?,?,?)")
+      .run(username, this.hashPassword(passcode), now, "user");
     return { username };
   }
 
@@ -285,7 +311,9 @@ export class DashboardDbSqlite {
 
   getUserSettings(usernameRaw: string): {
     username: string;
-    hasOpenaiKey: boolean;
+    aiAvailable: boolean;
+    bidModel: string;
+    bidModelOptions: string[];
     hasSlackConnected: boolean;
     slackUsername: string;
     slackUserId: string;
@@ -295,15 +323,15 @@ export class DashboardDbSqlite {
     const username = this.normUsername(usernameRaw);
 
     const userRow = this.db
-      .prepare("SELECT slack_username, slack_user_id, slack_user_token_enc FROM users WHERE username = ?")
+      .prepare("SELECT slack_username, slack_user_id, slack_user_token_enc, bid_model FROM users WHERE username = ?")
       .get(username) as
-      | { slack_username: string | null; slack_user_id: string | null; slack_user_token_enc: string | null }
+      | {
+          slack_username: string | null;
+          slack_user_id: string | null;
+          slack_user_token_enc: string | null;
+          bid_model: string | null;
+        }
       | undefined;
-
-    const secret = this.db.prepare("SELECT 1 FROM secrets WHERE username = ?").get(username) as
-      | { 1: number }
-      | undefined;
-    const hasOpenaiKey = Boolean(secret);
 
     const styles = this.db.prepare(
       "SELECT style_id, name, updated_at FROM styles WHERE username = ? ORDER BY updated_at DESC LIMIT 50",
@@ -311,12 +339,33 @@ export class DashboardDbSqlite {
 
     return {
       username,
-      hasOpenaiKey,
+      aiAvailable: this.countActiveOpenRouterKeys() > 0,
+      bidModel: normalizeBidModel(userRow?.bid_model),
+      bidModelOptions: [...BID_MODEL_OPTIONS],
       hasSlackConnected: Boolean(userRow?.slack_user_token_enc),
       slackUsername: userRow?.slack_username?.trim() ?? "",
       slackUserId: userRow?.slack_user_id?.trim() ?? "",
       styles: styles.map((s) => ({ styleId: s.style_id, name: s.name, updatedAt: s.updated_at })),
     };
+  }
+
+  getBidModel(usernameRaw: string): string {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    const row = this.db.prepare("SELECT bid_model FROM users WHERE username = ?").get(username) as
+      | { bid_model: string | null }
+      | undefined;
+    return normalizeBidModel(row?.bid_model);
+  }
+
+  setBidModel(usernameRaw: string, modelRaw: string): string {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    if (!username) throw new Error("Username required");
+    const model = assertBidModel(modelRaw);
+    const r = this.db.prepare("UPDATE users SET bid_model = ? WHERE username = ?").run(model, username);
+    if (r.changes === 0) throw new Error("User not found");
+    return model;
   }
 
   getOpenAiKey(usernameRaw: string): string | undefined {
@@ -450,6 +499,7 @@ export class DashboardDbSqlite {
 
   listUsers(): Array<{
     username: string;
+    role: "admin" | "user";
     createdAt: number;
     hasOpenaiKey: boolean;
     styleCount: number;
@@ -458,6 +508,7 @@ export class DashboardDbSqlite {
     const rows = this.db.prepare(`
       SELECT
         u.username,
+        u.role,
         u.created_at AS created_at,
         EXISTS(SELECT 1 FROM secrets s WHERE s.username = u.username) AS has_openai_key,
         (SELECT COUNT(*) FROM styles st WHERE st.username = u.username) AS style_count
@@ -465,6 +516,7 @@ export class DashboardDbSqlite {
       ORDER BY u.created_at ASC
     `).all() as Array<{
       username: string;
+      role: string | null;
       created_at: number;
       has_openai_key: number;
       style_count: number;
@@ -472,20 +524,197 @@ export class DashboardDbSqlite {
 
     return rows.map((r) => ({
       username: r.username,
+      role: r.role === "admin" ? "admin" : "user",
       createdAt: r.created_at,
       hasOpenaiKey: Boolean(r.has_openai_key),
       styleCount: Number(r.style_count) || 0,
     }));
   }
 
+  countAdmins(): number {
+    if (!this.db) throw new Error("DB not connected");
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get() as { n: number };
+    return Number(row.n) || 0;
+  }
+
+  getUserRole(usernameRaw: string): "admin" | "user" {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    const row = this.db.prepare("SELECT role FROM users WHERE username = ?").get(username) as
+      | { role: string | null }
+      | undefined;
+    if (!row) throw new Error("User not found");
+    return row.role === "admin" ? "admin" : "user";
+  }
+
+  isUserAdmin(usernameRaw: string): boolean {
+    if (!this.db) return false;
+    try {
+      return this.getUserRole(usernameRaw) === "admin";
+    } catch {
+      return false;
+    }
+  }
+
+  setUserRole(usernameRaw: string, roleRaw: string): void {
+    if (!this.db) throw new Error("DB not connected");
+    const username = this.normUsername(usernameRaw);
+    if (!username) throw new Error("Username required");
+    const role = roleRaw === "admin" ? "admin" : roleRaw === "user" ? "user" : null;
+    if (!role) throw new Error("Role must be admin or user");
+
+    const current = this.getUserRole(username);
+    if (current === role) return;
+
+    if (current === "admin" && role === "user" && this.countAdmins() <= 1) {
+      throw new Error("Cannot demote the last admin");
+    }
+
+    const r = this.db.prepare("UPDATE users SET role = ? WHERE username = ?").run(role, username);
+    if (r.changes === 0) throw new Error("User not found");
+  }
+
   deleteUser(usernameRaw: string): void {
     if (!this.db) throw new Error("DB not connected");
     const username = this.normUsername(usernameRaw);
     if (!username) throw new Error("Username required");
-    if (username === "riora") throw new Error("Cannot delete admin account");
+    if (this.getUserRole(username) === "admin" && this.countAdmins() <= 1) {
+      throw new Error("Cannot delete the last admin account");
+    }
 
     const r = this.db.prepare("DELETE FROM users WHERE username = ?").run(username);
     if (r.changes === 0) throw new Error("User not found");
+  }
+
+  private static readonly OPENROUTER_ENC_USER = "__openrouter__";
+
+  createOpenRouterKeyStore(): OpenRouterKeyStore {
+    return {
+      getActiveKeys: () => this.getActiveOpenRouterKeys(),
+      markExhausted: (id, error) => this.markOpenRouterKeyExhausted(id, error),
+    };
+  }
+
+  listOpenRouterKeys(): Array<{
+    id: number;
+    masked: string;
+    status: "active" | "exhausted";
+    lastError: string | null;
+    createdAt: number;
+    updatedAt: number;
+  }> {
+    if (!this.db) throw new Error("DB not connected");
+    const rows = this.db.prepare(`
+      SELECT id, key_enc, status, last_error, created_at, updated_at
+      FROM openrouter_keys
+      ORDER BY id ASC
+    `).all() as Array<{
+      id: number;
+      key_enc: string;
+      status: string;
+      last_error: string | null;
+      created_at: number;
+      updated_at: number;
+    }>;
+
+    return rows.map((r) => {
+      let masked = "••••";
+      try {
+        masked = maskApiKey(this.decrypt(DashboardDbSqlite.OPENROUTER_ENC_USER, r.key_enc));
+      } catch {
+        masked = "••••";
+      }
+      return {
+        id: r.id,
+        masked,
+        status: r.status === "exhausted" ? "exhausted" : "active",
+        lastError: r.last_error,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      };
+    });
+  }
+
+  addOpenRouterKeys(keysText: string): { added: number; skipped: number } {
+    if (!this.db) throw new Error("DB not connected");
+    const lines = keysText
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (lines.length === 0) throw new Error("Paste at least one API key (one per line)");
+
+    const insert = this.db.prepare(`
+      INSERT INTO openrouter_keys(key_hash, key_enc, status, last_error, created_at, updated_at)
+      VALUES(?, ?, 'active', NULL, ?, ?)
+    `);
+    const existsStmt = this.db.prepare("SELECT 1 FROM openrouter_keys WHERE key_hash = ?");
+    const now = Date.now();
+    let added = 0;
+    let skipped = 0;
+
+    const tx = this.db.transaction((keys: string[]) => {
+      for (const key of keys) {
+        const keyHash = hashApiKey(key);
+        if (existsStmt.get(keyHash)) {
+          skipped += 1;
+          continue;
+        }
+        const enc = this.encrypt(DashboardDbSqlite.OPENROUTER_ENC_USER, key);
+        insert.run(keyHash, enc, now, now);
+        added += 1;
+      }
+    });
+    tx(lines);
+    return { added, skipped };
+  }
+
+  getActiveOpenRouterKeys(): Array<{ id: number; key: string }> {
+    if (!this.db) throw new Error("DB not connected");
+    const rows = this.db.prepare(`
+      SELECT id, key_enc FROM openrouter_keys
+      WHERE status = 'active'
+      ORDER BY id ASC
+    `).all() as Array<{ id: number; key_enc: string }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      key: this.decrypt(DashboardDbSqlite.OPENROUTER_ENC_USER, r.key_enc),
+    }));
+  }
+
+  markOpenRouterKeyExhausted(id: number, error: string): void {
+    if (!this.db) throw new Error("DB not connected");
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE openrouter_keys
+      SET status = 'exhausted', last_error = ?, updated_at = ?
+      WHERE id = ?
+    `).run(error.slice(0, 500), now, id);
+  }
+
+  reactivateOpenRouterKey(id: number): void {
+    if (!this.db) throw new Error("DB not connected");
+    const now = Date.now();
+    const r = this.db.prepare(`
+      UPDATE openrouter_keys
+      SET status = 'active', last_error = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(now, id);
+    if (r.changes === 0) throw new Error("OpenRouter key not found");
+  }
+
+  deleteOpenRouterKey(id: number): void {
+    if (!this.db) throw new Error("DB not connected");
+    const r = this.db.prepare("DELETE FROM openrouter_keys WHERE id = ?").run(id);
+    if (r.changes === 0) throw new Error("OpenRouter key not found");
+  }
+
+  countActiveOpenRouterKeys(): number {
+    if (!this.db) throw new Error("DB not connected");
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM openrouter_keys WHERE status = 'active'",
+    ).get() as { n: number };
+    return Number(row.n) || 0;
   }
 
   private normClientUsername(u: string): string {
