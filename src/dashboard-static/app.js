@@ -180,6 +180,82 @@
       .replaceAll("'", "&#39;");
   }
 
+  function closeAppDialog() {
+    document.getElementById("appDialog")?.remove();
+  }
+
+  function showAppDialog(opts) {
+    const o = typeof opts === "string" ? { message: opts } : opts || {};
+    const title = o.title ?? "Notice";
+    const message = o.message ?? "";
+    const confirmText = o.confirmText ?? "OK";
+    const showCancel = Boolean(o.showCancel);
+    const danger = Boolean(o.danger);
+    const cancelText = o.cancelText ?? "Cancel";
+
+    closeAppDialog();
+
+    return new Promise((resolve) => {
+      const titleId = `appDialogTitle-${Date.now()}`;
+      const overlay = document.createElement("div");
+      overlay.id = "appDialog";
+      overlay.className = "modalOverlay appDialogOverlay";
+      overlay.innerHTML = `
+        <div class="modalCard appDialogCard" role="alertdialog" aria-modal="true" aria-labelledby="${titleId}">
+          <h3 id="${titleId}">${esc(title)}</h3>
+          <div class="sub appDialogMsg">${esc(message)}</div>
+          <div class="modalActions appDialogActions">
+            ${showCancel ? `<button type="button" class="btn appDialogCancel">${esc(cancelText)}</button>` : ""}
+            <button type="button" class="btnPrimary appDialogConfirm${danger ? " btnDangerPrimary" : ""}">${esc(confirmText)}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      const finish = (value) => {
+        document.removeEventListener("keydown", onKey);
+        closeAppDialog();
+        resolve(value);
+      };
+
+      const onKey = (e) => {
+        if (e.key === "Escape") finish(showCancel ? false : undefined);
+        if (e.key === "Enter") finish(showCancel ? true : undefined);
+      };
+      document.addEventListener("keydown", onKey);
+
+      overlay.querySelector(".appDialogConfirm")?.addEventListener("click", () =>
+        finish(showCancel ? true : undefined),
+      );
+      overlay.querySelector(".appDialogCancel")?.addEventListener("click", () => finish(false));
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay && showCancel) finish(false);
+      });
+
+      overlay.querySelector(".appDialogConfirm")?.focus();
+    });
+  }
+
+  function appConfirm(message, opts = {}) {
+    return showAppDialog({
+      title: opts.title ?? "Confirm",
+      message,
+      confirmText: opts.confirmText ?? "Confirm",
+      cancelText: opts.cancelText ?? "Cancel",
+      showCancel: true,
+      danger: opts.danger,
+    });
+  }
+
+  function appAlert(message, opts = {}) {
+    return showAppDialog({
+      title: opts.title ?? "Notice",
+      message,
+      confirmText: opts.confirmText ?? "OK",
+      showCancel: false,
+    });
+  }
+
   function route() {
     const h = window.location.hash || "#/app";
     return h.startsWith("#") ? h.slice(1) : h;
@@ -537,7 +613,7 @@
         } catch (e) {
           const errMsg = e?.message || String(e);
           if (msgEl) msgEl.textContent = "Error: " + errMsg;
-          alert("Error: " + errMsg);
+          void appAlert("Error: " + errMsg);
         } finally {
           if (btn) {
             btn.disabled = false;
@@ -548,7 +624,7 @@
       host.querySelectorAll("[data-delete-or-key]").forEach((btn) => {
         btn.addEventListener("click", async () => {
           const id = btn.getAttribute("data-delete-or-key");
-          if (!id || !confirm("Delete this API key?")) return;
+          if (!id || !(await appConfirm("Delete this API key?", { title: "Delete API key", confirmText: "Delete", danger: true }))) return;
           try {
             await api("/api/admin/openrouter-keys/" + encodeURIComponent(id), { method: "DELETE" });
             toast("Key deleted");
@@ -653,7 +729,7 @@
           const enabled = btn.getAttribute("data-next-enabled") === "1";
           if (!id) return;
           const label = enabled ? "enable" : "disable";
-          if (!confirm(`${label.charAt(0).toUpperCase() + label.slice(1)} this model for users?`)) return;
+          if (!(await appConfirm(`${label.charAt(0).toUpperCase() + label.slice(1)} this model for users?`, { title: "Change model" }))) return;
           btn.disabled = true;
           try {
             await api("/api/admin/bid-models/" + encodeURIComponent(id) + "/toggle", {
@@ -701,7 +777,7 @@
         btn.addEventListener("click", async () => {
           const username = btn.getAttribute("data-delete-user") || "";
           if (!username || username === me) return;
-          if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+          if (!(await appConfirm(`Delete user "${username}"? This cannot be undone.`, { title: "Delete user", confirmText: "Delete", danger: true }))) return;
           try {
             await deleteAdminUser(username);
             toast("User deleted");
@@ -715,7 +791,7 @@
         btn.addEventListener("click", async () => {
           const username = btn.getAttribute("data-reset-user") || "";
           if (!username) return;
-          if (!confirm(`Reset password for "${username}" to "${DEFAULT_USER_PASSWORD}"?`)) return;
+          if (!(await appConfirm(`Reset password for "${username}" to "${DEFAULT_USER_PASSWORD}"?`, { title: "Reset password" }))) return;
           try {
             await resetAdminUserPassword(username);
             toast(`Password reset to "${DEFAULT_USER_PASSWORD}"`);
@@ -733,7 +809,7 @@
           const role = sel.value === "admin" ? "admin" : "user";
           const prev = sel.dataset.prevRole || (role === "admin" ? "user" : "admin");
           if (!username) return;
-          if (!confirm(`Set role for "${username}" to "${role}"?`)) {
+          if (!(await appConfirm(`Set role for "${username}" to "${role}"?`, { title: "Change role" }))) {
             sel.value = prev;
             return;
           }
@@ -901,15 +977,15 @@
       const createBtn = document.getElementById("modalCreateStyle");
 
       if (!name) {
-        alert("Style name is required.");
+        void appAlert("Style name is required.");
         return;
       }
       if (!text.trim()) {
-        alert("Style text is required.");
+        void appAlert("Style text is required.");
         return;
       }
       if (styleNameTaken(name, "", settings?.styles || [])) {
-        alert("A bid style with this name already exists. Choose a different name.");
+        void appAlert("A bid style with this name already exists. Choose a different name.");
         return;
       }
 
@@ -925,10 +1001,10 @@
         });
         await loadSettings();
         close();
-        alert("Bid style created.");
+        toast("Bid style created.");
         nav("/profile");
       } catch (e) {
-        alert("Error: " + (e?.message || String(e)));
+        void appAlert("Error: " + (e?.message || String(e)));
         if (createBtn) {
           createBtn.disabled = false;
           createBtn.textContent = "Create";
@@ -987,7 +1063,7 @@
       const msg = document.getElementById("msg");
 
       if (!username || !passcode) {
-        alert("Username and passcode are required.");
+        void appAlert("Username and passcode are required.");
         return;
       }
 
@@ -1006,7 +1082,7 @@
         nav("/app");
       } catch (e) {
         const errMsg = e?.message || String(e);
-        alert("Error: " + errMsg);
+        void appAlert("Error: " + errMsg);
         if (msg) msg.textContent = "Error: " + errMsg;
       } finally {
         setAuthLoading(false, kind);
@@ -1141,15 +1217,15 @@
       const confirmPasscode = document.getElementById("pwConfirm")?.value || "";
       const pwmsg = document.getElementById("pwmsg");
       if (!currentPasscode || !newPasscode) {
-        alert("Current and new passcode are required.");
+        void appAlert("Current and new passcode are required.");
         return;
       }
       if (newPasscode.length < 4) {
-        alert("New passcode must be at least 4 characters.");
+        void appAlert("New passcode must be at least 4 characters.");
         return;
       }
       if (newPasscode !== confirmPasscode) {
-        alert("New passcode and confirmation do not match.");
+        void appAlert("New passcode and confirmation do not match.");
         return;
       }
       const saveBtn = document.getElementById("savePw");
@@ -1170,7 +1246,7 @@
         toast("Passcode updated");
       } catch (e) {
         const errMsg = e?.message || String(e);
-        alert("Error: " + errMsg);
+        void appAlert("Error: " + errMsg);
         if (pwmsg) pwmsg.textContent = "Error: " + errMsg;
       } finally {
         if (saveBtn) {
@@ -1193,7 +1269,7 @@
         nav("/profile");
       } catch (e) {
         const errMsg = e?.message || String(e);
-        alert("Error: " + errMsg);
+        void appAlert("Error: " + errMsg);
         if (slackmsg) slackmsg.textContent = "Error: " + errMsg;
       }
     });
@@ -1252,7 +1328,7 @@
 
     document.getElementById("saveS")?.addEventListener("click", async () => {
       if (!curStyleId) {
-        alert("Select a bid style to update, or click New to create one.");
+        void appAlert("Select a bid style to update, or click New to create one.");
         return;
       }
       const name = (document.getElementById("sn")?.value || "").trim();
@@ -1262,15 +1338,15 @@
       const updateBtn = document.getElementById("saveS");
 
       if (!name) {
-        alert("Style name is required.");
+        void appAlert("Style name is required.");
         return;
       }
       if (!text.trim()) {
-        alert("Style text is required.");
+        void appAlert("Style text is required.");
         return;
       }
       if (styleNameTaken(name, curStyleId, settings?.styles || [])) {
-        alert("A bid style with this name already exists. Choose a different name.");
+        void appAlert("A bid style with this name already exists. Choose a different name.");
         return;
       }
 
@@ -1285,11 +1361,11 @@
           body: JSON.stringify({ styleId: curStyleId, name, text, bidModel }),
         });
         await loadSettings();
-        alert("Bid style updated.");
+        toast("Bid style updated.");
         nav("/profile");
       } catch (e) {
         const errMsg = e?.message || String(e);
-        alert("Error: " + errMsg);
+        void appAlert("Error: " + errMsg);
         if (smsg) smsg.textContent = "Error: " + errMsg;
       } finally {
         if (updateBtn) {
@@ -1301,14 +1377,14 @@
 
     document.getElementById("delS")?.addEventListener("click", async () => {
       if (!curStyleId) return;
-      if (!confirm("Delete this bid style?")) return;
+      if (!(await appConfirm("Delete this bid style?", { title: "Delete bid style", confirmText: "Delete", danger: true }))) return;
       try {
         await api("/api/settings/styles/" + encodeURIComponent(curStyleId), { method: "DELETE" });
         await loadSettings();
-        alert("Bid style deleted.");
+        toast("Bid style deleted.");
         nav("/profile");
       } catch (e) {
-        alert("Error: " + (e?.message || String(e)));
+        void appAlert("Error: " + (e?.message || String(e)));
       }
     });
 
@@ -1466,7 +1542,7 @@
     document.getElementById("clientsDeleteSelected")?.addEventListener("click", async () => {
       const usernames = [...clientsSelected];
       if (!usernames.length) return;
-      if (!confirm(`Delete ${usernames.length} client profile${usernames.length === 1 ? "" : "s"}?`)) return;
+      if (!(await appConfirm(`Delete ${usernames.length} client profile${usernames.length === 1 ? "" : "s"}?`, { title: "Delete profiles", confirmText: "Delete", danger: true }))) return;
       const deleteBtn = document.getElementById("clientsDeleteSelected");
       if (deleteBtn) {
         deleteBtn.disabled = true;
@@ -1486,7 +1562,7 @@
         }
         await loadClientsResults(gridEl, pagerEl);
       } catch (e) {
-        alert("Error: " + (e?.message || String(e)));
+        void appAlert("Error: " + (e?.message || String(e)));
         updateClientsBulkUi();
       } finally {
         if (deleteBtn) deleteBtn.textContent = "Delete selected";
@@ -2380,7 +2456,7 @@
               await sendSlackForProject(item.project);
               toast("Sent to Good Job");
             } catch (err) {
-              alert("Error: " + (err?.message || String(err)));
+              void appAlert("Error: " + (err?.message || String(err)));
             } finally {
               btn.disabled = false;
               btn.textContent = slackSendButtonLabel();

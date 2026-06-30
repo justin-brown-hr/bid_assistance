@@ -2109,6 +2109,14 @@ export class DashboardServer {
       }
       .modalCard h3 { margin: 0 0 8px; font-size: 18px; font-weight: 700; }
       .modalCard .sub { margin-bottom: 16px; }
+      .appDialogCard { max-width: 420px; }
+      .appDialogMsg { white-space: pre-wrap; line-height: 1.5; margin-bottom: 0; color: var(--text); }
+      .appDialogActions { justify-content: flex-end; }
+      .btnDangerPrimary {
+        border-color: #dc2626;
+        background: #dc2626;
+      }
+      .btnDangerPrimary:hover { filter: brightness(1.06); }
       .modalActions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
       input:focus, textarea:focus { border-color:#93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
       .panelActions { display:flex; gap:8px; flex-wrap:wrap; margin-top: 12px; }
