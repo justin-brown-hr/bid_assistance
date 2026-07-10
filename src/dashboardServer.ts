@@ -632,8 +632,15 @@ export class DashboardServer {
         const username = this.verifySession(req.headers.cookie);
         if (username && this.db && !this.db.hasUser(username)) {
           res.setHeader("set-cookie", ["dash_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"]);
+          res.statusCode = 401;
           res.setHeader("content-type", "application/json; charset=utf-8");
           res.end(JSON.stringify({ ok: false, error: "Session expired — please sign in again" }));
+          return;
+        }
+        if (!username) {
+          res.statusCode = 401;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ ok: false, error: "Not logged in", username: null, isAdmin: false }));
           return;
         }
         res.setHeader("content-type", "application/json; charset=utf-8");

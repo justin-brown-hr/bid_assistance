@@ -475,10 +475,12 @@
   }
 
   async function doLogout() {
-    await fetch("/api/logout", { method: "POST" }).catch(() => {});
+    await fetch("/api/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
     me = null;
     settings = null;
     isAdmin = false;
+    selectedStyleId = "";
+    selectedProjectId = "";
     stopEventStream();
     state.clear();
     clearHeaderSession();
@@ -497,7 +499,7 @@
   }
 
   async function api(url, opts) {
-    const res = await fetch(url, opts);
+    const res = await fetch(url, { credentials: "same-origin", ...opts });
     const json = await res.json().catch(() => ({}));
     if (!res.ok || (json && json.ok === false)) {
       throw new Error((json && json.error) ? json.error : "Request failed");
@@ -1200,19 +1202,21 @@
       if (msg) msg.textContent = "";
 
       try {
-        await api(endpoint, {
+        const j = await api(endpoint, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ username, passcode }),
+          body: JSON.stringify({ username, passcode: passcode.trim() }),
         });
+        me = j.username || username.toLowerCase();
+        isAdmin = false;
         await loadMe();
         await loadSettings();
         await bootstrapFeed();
         nav("/app");
       } catch (e) {
         const errMsg = e?.message || String(e);
-        void appAlert("Error: " + errMsg);
-        if (msg) msg.textContent = "Error: " + errMsg;
+        void appAlert(errMsg, { title: kind === "signup" ? "Sign up failed" : "Sign in failed" });
+        if (msg) msg.textContent = errMsg;
       } finally {
         setAuthLoading(false, kind);
       }
@@ -2634,7 +2638,14 @@
         return;
       }
       await loadSettings();
-    } catch {
+    } catch (e) {
+      me = null;
+      settings = null;
+      isAdmin = false;
+      const errMsg = e?.message || String(e);
+      toast(errMsg.includes("Not logged in") || errMsg.includes("Session expired")
+        ? "Please sign in again"
+        : `Error: ${errMsg}`);
       nav("/signin");
       return;
     }

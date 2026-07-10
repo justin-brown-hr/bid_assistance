@@ -329,8 +329,9 @@ export class DashboardDbSqlite {
   createUser(usernameRaw: string, passcode: string): { username: string } {
     if (!this.db) throw new Error("DB not connected");
     const username = this.normUsername(usernameRaw);
+    const pass = passcode.trim();
     if (!username) throw new Error("Username required");
-    if (!passcode || passcode.trim().length < 4) throw new Error("Passcode must be at least 4 chars");
+    if (!pass || pass.length < 4) throw new Error("Passcode must be at least 4 chars");
 
     const exists = this.db.prepare("SELECT 1 FROM users WHERE username = ?").get(username) as
       | { 1: number }
@@ -339,21 +340,22 @@ export class DashboardDbSqlite {
 
     const now = Date.now();
     this.db.prepare("INSERT INTO users(username, pass_hash, created_at, role) VALUES(?,?,?,?)")
-      .run(username, this.hashPassword(passcode), now, "user");
+      .run(username, this.hashPassword(pass), now, "user");
     return { username };
   }
 
   verifyUser(usernameRaw: string, passcode: string): { username: string } {
     if (!this.db) throw new Error("DB not connected");
     const username = this.normUsername(usernameRaw);
+    const pass = passcode.trim();
     if (!username) throw new Error("Username required");
-    if (!passcode || passcode.trim().length < 4) throw new Error("Passcode must be at least 4 chars");
+    if (!pass || pass.length < 4) throw new Error("Passcode must be at least 4 chars");
 
     const row = this.db.prepare("SELECT pass_hash FROM users WHERE username = ?").get(username) as
       | { pass_hash: string }
       | undefined;
     if (!row) throw new Error("User not found");
-    if (!this.verifyPassword(passcode, row.pass_hash)) throw new Error("Invalid passcode");
+    if (!this.verifyPassword(pass, row.pass_hash)) throw new Error("Invalid passcode");
     return { username };
   }
 
