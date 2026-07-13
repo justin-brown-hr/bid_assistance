@@ -1,8 +1,8 @@
 # VPS Deployment Guide — noirehaven.com
 
 Production host: **noirehaven.com** → VPS `82.38.44.49`  
-App path (typical): `/home/user/work/Freelancer_Helper_t`  
-Reverse proxy project: `/home/user/work/bid_assistance/`  
+App path (typical): `/home/user/work/bid_assistance`  
+Reverse proxy: nginx site `noirehaven.com` (sample in `deploy/nginx-noirehaven.conf`)  
 Dashboard port: **3030** (PM2 process `freelancer-helper`)
 
 ## Architecture
@@ -39,7 +39,7 @@ Do **not** set `HEADLESS=false` on VPS for normal runs (use headless Chrome).
 ## 2. App install / update
 
 ```bash
-cd /home/user/work/Freelancer_Helper_t
+cd /home/user/work/bid_assistance
 git pull
 cp -n .env.example .env   # first time only
 nano .env                 # set secrets; DASHBOARD_PORT=3030
@@ -59,13 +59,13 @@ pm2 startup   # once, follow printed command
 Copy the sample site config:
 
 ```bash
-sudo cp /home/user/work/Freelancer_Helper_t/deploy/nginx-noirehaven.conf \
+sudo cp /home/user/work/bid_assistance/deploy/nginx-noirehaven.conf \
   /etc/nginx/sites-available/noirehaven.com
 sudo ln -sf /etc/nginx/sites-available/noirehaven.com /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-If `/home/user/work/bid_assistance/` already manages nginx, merge the same `proxy_pass` / SSE settings into that project’s config instead of (or in addition to) sites-available.
+If an older router project previously managed nginx, use this same site file (or merge the `proxy_pass` / SSE settings into that config).
 
 ## 4. DNS
 
