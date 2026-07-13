@@ -123,6 +123,59 @@
       .join("");
   }
 
+  function playNewProjectBeep() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.value = 0.08;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+      osc.stop(ctx.currentTime + 0.26);
+      setTimeout(() => ctx.close().catch(() => {}), 400);
+    } catch {}
+  }
+
+  function ensureNotificationPermission() {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      void Notification.requestPermission().catch(() => {});
+    }
+  }
+
+  function alertNewProject(item) {
+    const title = String(item?.project?.title || "New project").trim() || "New project";
+    const short = title.length > 80 ? title.slice(0, 77) + "…" : title;
+    toast("New project: " + short);
+    playNewProjectBeep();
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      const n = new Notification("Freelancer Helper", {
+        body: short,
+        tag: "fh-project-" + String(item?.id || Date.now()),
+        renotify: true,
+      });
+      n.onclick = () => {
+        try {
+          window.focus();
+        } catch {}
+        if (item?.id) {
+          selectedProjectId = item.id;
+          clearNewHighlight(item.id);
+          nav("/app");
+          refreshListIfOnApp();
+        }
+        n.close();
+      };
+    } catch {}
+  }
+
   function handleSseMessage(msg) {
     if (!msg?.item) return;
     const isNewProject = feedReady && !state.has(msg.item.id);
@@ -133,6 +186,7 @@
     }
     if (isNewProject) {
       highlightNewProject(msg.item.id);
+      alertNewProject(msg.item);
     } else {
       refreshListIfOnApp();
     }
@@ -1212,6 +1266,7 @@
         await loadMe();
         await loadSettings();
         await bootstrapFeed();
+        ensureNotificationPermission();
         nav("/app");
       } catch (e) {
         const errMsg = e?.message || String(e);
@@ -2466,6 +2521,7 @@
   function renderApp() {
     setMainLayout("default");
     updateHeaderSession();
+    ensureNotificationPermission();
     loadStylePickerMode();
     loadBidLanguage();
     const styles = settings?.styles || [];

@@ -3,3 +3,4 @@ dist/
 .env
 playwright/.cache/
 data
+setdomain.md

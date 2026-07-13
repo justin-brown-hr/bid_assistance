@@ -1,147 +1,125 @@
-# VPS Deployment Guide
+# VPS Deployment Guide — noirehaven.com
 
-## 1. VPS Setup (Ubuntu 22.04)
+Production host: **noirehaven.com** → VPS `82.38.44.49`  
+App path (typical): `/home/user/work/Freelancer_Helper_t`  
+Reverse proxy project: `/home/user/work/bid_assistance/`  
+Dashboard port: **3030** (PM2 process `freelancer-helper`)
+
+## Architecture
+
+```
+Browser → nginx (noirehaven.com) → 127.0.0.1:3030 (Node / PM2)
+```
+
+SSE (`/events`) needs long proxy timeouts — see [`deploy/nginx-noirehaven.conf`](deploy/nginx-noirehaven.conf).
+
+## 1. VPS prerequisites (Ubuntu)
 
 ```bash
-# Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install Node.js 22
+# Node.js 22
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 
-# Install Chrome
+# Chrome (Freelancer login / scrape)
 wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
 echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
 sudo apt update
 sudo apt install -y google-chrome-stable
 
-# Verify installations
-node --version  # should be v22.x
-google-chrome --version
+# Nginx + Certbot
+sudo apt install -y nginx certbot python3-certbot-nginx
+
+sudo npm install -g pm2
 ```
 
-## 2. Upload Project
+Do **not** set `HEADLESS=false` on VPS for normal runs (use headless Chrome).
+
+## 2. App install / update
 
 ```bash
-# Option A: Git clone
-git clone YOUR_REPO_URL /home/ubuntu/freelancer-bot
-cd /home/ubuntu/freelancer-bot
+cd /home/user/work/Freelancer_Helper_t
+git pull
+cp -n .env.example .env   # first time only
+nano .env                 # set secrets; DASHBOARD_PORT=3030
 
-# Option B: SCP from local machine
-# scp -r E:\Todo\Notification ubuntu@YOUR_VPS_IP:/home/ubuntu/freelancer-bot
-```
-
-## 3. Configure Environment
-
-```bash
-cd /home/ubuntu/freelancer-bot
-cp .env.example .env
-nano .env
-```
-
-Fill in all values:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `FREELANCER_EMAIL`
-- `FREELANCER_PASSWORD`
-- `FREELANCER_SEARCH_URLS`
-
-**Important:** Do NOT set `HEADLESS=false` on VPS — leave it unset for headless mode.
-
-## 4. Install Dependencies & Build
-
-```bash
 npm install
 npm run build
-```
 
-## 5. Run with PM2 (24/7 operation)
-
-```bash
-# Install PM2 globally
-sudo npm install -g pm2
-
-# Start the bot
-pm2 start dist/index.js --name freelancer-bot
-
-# View logs
-pm2 logs freelancer-bot
-
-# Auto-restart on VPS reboot
-pm2 startup
-# Copy and run the command PM2 prints
+pm2 start ecosystem.config.cjs
+# or after updates:
+pm2 restart freelancer-helper
 pm2 save
+pm2 startup   # once, follow printed command
 ```
 
-## 6. Useful Commands
+## 3. Nginx (bid_assistance / sites)
+
+Copy the sample site config:
 
 ```bash
-# Check status
+sudo cp /home/user/work/Freelancer_Helper_t/deploy/nginx-noirehaven.conf \
+  /etc/nginx/sites-available/noirehaven.com
+sudo ln -sf /etc/nginx/sites-available/noirehaven.com /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+If `/home/user/work/bid_assistance/` already manages nginx, merge the same `proxy_pass` / SSE settings into that project’s config instead of (or in addition to) sites-available.
+
+## 4. DNS
+
+Point A records:
+
+- `noirehaven.com` → `82.38.44.49`
+- `www.noirehaven.com` → `82.38.44.49` (optional)
+
+## 5. HTTPS
+
+```bash
+sudo certbot --nginx -d noirehaven.com -d www.noirehaven.com
+```
+
+After certbot, confirm `/events` still has `proxy_buffering off` and long `proxy_read_timeout`.
+
+## 6. Slack OAuth (production)
+
+In the Slack app → **OAuth & Permissions → Redirect URLs**, add:
+
+```
+https://noirehaven.com/api/slack/oauth/callback
+```
+
+The app uses `X-Forwarded-Proto` / `Host` to build the redirect URI.
+
+## 7. Smoke tests
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" https://noirehaven.com/
+curl -sS https://noirehaven.com/api/me
+# EventSource: open browser DevTools → Network → /events should stay open
+pm2 logs freelancer-helper --lines 50
+```
+
+## 8. Browser alerts
+
+Logged-in users on the Projects page get:
+
+- Desktop **Notification** (allow when prompted)
+- In-page **toast**
+- Short **beep**
+
+when a new project arrives over SSE.
+
+## 9. Troubleshooting
+
+```bash
 pm2 status
-
-# View live logs
-pm2 logs freelancer-bot --lines 100
-
-# Restart after code changes
-pm2 restart freelancer-bot
-
-# Stop
-pm2 stop freelancer-bot
-
-# Delete
-pm2 delete freelancer-bot
+pm2 logs freelancer-helper --err
+sudo nginx -t
+sudo journalctl -u nginx -n 50
 ```
 
-## 7. Deploy Updates
+**Chrome not found:** ensure `google-chrome-stable` is on `PATH`.
 
-When you make code changes locally:
-
-```bash
-# On local machine
-npm run build
-scp -r dist ubuntu@YOUR_VPS_IP:/home/ubuntu/freelancer-bot/
-
-# On VPS
-ssh ubuntu@YOUR_VPS_IP
-pm2 restart freelancer-bot
-```
-
-## 8. Monitoring
-
-The bot sends Telegram alerts for:
-- 🚨 Critical errors (crashes, unhandled exceptions)
-- ⚠️ WebSocket disconnections (auto-reconnects)
-- 📊 Daily report at 1:00 PM (project count summary)
-
-PM2 logs are stored at: `~/.pm2/logs/freelancer-bot-out.log`
-
-## 9. Session Management
-
-- Session auto-refreshes every 5 days
-- Session valid for 30 days
-- Auto-relogin if session expires (headless, no manual intervention)
-- If login fails (rare CAPTCHA), you'll see error in Telegram + PM2 logs
-
-## 10. Troubleshooting
-
-**Bot not starting:**
-```bash
-pm2 logs freelancer-bot --err
-```
-
-**Chrome not found:**
-```bash
-which google-chrome-stable
-# Update CHROME_PATH in src/collect/wsCollector.ts if needed
-```
-
-**Session expired and can't auto-login:**
-- Check `.env` has correct `FREELANCER_EMAIL` and `FREELANCER_PASSWORD`
-- Manually run once with `HEADLESS=false` to see what's blocking login
-- Check PM2 logs for CAPTCHA or login errors
-
-**WebSocket keeps disconnecting:**
-- Check VPS network stability
-- Check PM2 logs for connection errors
-- The bot auto-reconnects every 5s — notifications will resume automatically
+**Session / CAPTCHA:** check Freelancer credentials in `.env`; rare CAPTCHA may need a one-off visible login.
