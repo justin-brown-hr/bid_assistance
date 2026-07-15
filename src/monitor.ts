@@ -111,7 +111,22 @@ export async function startMonitor() {
   });
 
   async function handleNewProject(p: Project) {
-    if (store.has(p.id)) return;
+    const scrapeReq = p.clientUsername
+      ? {
+          username: p.clientUsername,
+          projectUrl: p.url,
+          country: clientCountryNameForProfile(p),
+          joinDate: p.joinDate,
+          verification: p.clientVerificationText,
+          postedAt: Date.now(),
+        }
+      : null;
+
+    // Project already seen: still backfill client profile if the earlier scrape failed.
+    if (store.has(p.id)) {
+      if (scrapeReq) dashboard?.requestClientProfileScrapeIfMissing(scrapeReq);
+      return;
+    }
     store.mark(p.id, Date.now());
     await store.flush();
 
@@ -123,15 +138,8 @@ export async function startMonitor() {
       notified: false,
     });
 
-    if (p.clientUsername) {
-      dashboard?.requestClientProfileScrape({
-        username: p.clientUsername,
-        projectUrl: p.url,
-        country: clientCountryNameForProfile(p),
-        joinDate: p.joinDate,
-        verification: p.clientVerificationText,
-        postedAt: Date.now(),
-      });
+    if (scrapeReq) {
+      dashboard?.requestClientProfileScrape(scrapeReq);
     }
 
     if (!decision.ok) {

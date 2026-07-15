@@ -591,6 +591,14 @@ export class DashboardServer {
     this.clientProfiles?.enqueue(req);
   }
 
+  /** Re-try scrape for clients never saved (e.g. browser failed earlier while project was already marked seen). */
+  requestClientProfileScrapeIfMissing(req: ClientProfileScrapeRequest): void {
+    const username = String(req.username ?? "").trim().toLowerCase();
+    if (!username || !this.db) return;
+    if (this.db.getClientProfile(username)) return;
+    this.clientProfiles?.enqueue(req);
+  }
+
   start(): void {
     if (this.server) return;
 

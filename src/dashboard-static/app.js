@@ -149,14 +149,40 @@
     }
   }
 
+  function countryCodeToFlagEmoji(code) {
+    const c = String(code || "").trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(c)) return "";
+    return String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 - 65 + ch.charCodeAt(0)));
+  }
+
+  function formatAlertCountry(project) {
+    const raw = project?.clientCountry || project?.clientCountryCode || "";
+    const { code, name } = parseClientCountry(raw);
+    const flag = countryCodeToFlagEmoji(code || project?.clientCountryCode);
+    if (flag && name) return `${flag} ${name}`;
+    if (flag) return flag;
+    if (name) return name;
+    // clientCountry sometimes already includes a flag emoji + name
+    if (raw && /[\u{1F1E6}-\u{1F1FF}]{2}/u.test(String(raw))) return String(raw).trim();
+    return "";
+  }
+
   function alertNewProject(item) {
-    const title = String(item?.project?.title || "New project").trim() || "New project";
+    const p = item?.project || {};
+    const title = String(p.title || "New project").trim() || "New project";
     const short = title.length > 80 ? title.slice(0, 77) + "…" : title;
+    const country = formatAlertCountry(p);
+    const budget = String(p.budgetText || "").trim();
     toast("New project: " + short);
     playNewProjectBeep();
     if (!("Notification" in window) || Notification.permission !== "granted") return;
     try {
-      const n = new Notification("Freelancer Helper", {
+      // OS system notification: title = country + budget, body = project title
+      const metaParts = [];
+      if (country) metaParts.push(country);
+      if (budget) metaParts.push(budget);
+      const notifTitle = metaParts.length ? metaParts.join(" · ") : "Freelancer Helper";
+      const n = new Notification(notifTitle, {
         body: short,
         tag: "fh-project-" + String(item?.id || Date.now()),
         renotify: true,

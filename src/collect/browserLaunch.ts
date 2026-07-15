@@ -1,6 +1,17 @@
-/** Login/CAPTCHA requires a visible browser unless LOGIN_HEADLESS=true (e.g. VPS with Xvfb). */
+/**
+ * Login/CAPTCHA prefers a visible browser locally.
+ * On headless servers (no DISPLAY), default to headless Chrome so scraping works on VPS.
+ * Override with LOGIN_HEADLESS=true|false.
+ */
 export function isLoginHeadless(): boolean {
-  return process.env.LOGIN_HEADLESS === "true";
+  const explicit = process.env.LOGIN_HEADLESS;
+  if (explicit === "true") return true;
+  if (explicit === "false") return false;
+  // Linux/VPS without a GUI — visible Chrome cannot start
+  if (process.platform !== "win32" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return true;
+  }
+  return false;
 }
 
 export const LOGIN_BROWSER_ARGS = [
