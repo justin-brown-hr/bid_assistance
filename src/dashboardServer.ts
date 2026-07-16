@@ -382,12 +382,20 @@ function getStaticAppJs(): string {
 type GenerateBidRequest = {
   model?: string;
   language?: string;
+  /** When true, write the bid in the project description/content language (not title). */
+  matchProjectLanguage?: boolean;
   style: string;
   project: Project;
 };
 
+type GenerateBidResult = {
+  bid: string;
+  expectedTimeline: string;
+  bidBudget: string;
+};
+
 type GenerateBidResponse =
-  | { ok: true; bid: string }
+  | { ok: true; bid: string; expectedTimeline?: string; bidBudget?: string }
   | { ok: false; error: string };
 
 export type DashboardItem = {
@@ -545,22 +553,63 @@ export class DashboardServer {
     return JSON.parse(raw);
   }
 
-  private async generateBid(body: GenerateBidRequest): Promise<string> {
+  private parseGeneratedBid(raw: string): GenerateBidResult {
+    const text = String(raw || "").trim();
+    const timelineMatch = text.match(/^\s*EXPECTED_TIMELINE:\s*(.+)\s*$/im);
+    const budgetMatch = text.match(/^\s*BID_BUDGET:\s*(.+)\s*$/im);
+    let bid = text;
+    if (/^\s*EXPECTED_TIMELINE:/im.test(text) || /^\s*BID_BUDGET:/im.test(text)) {
+      bid = text
+        .replace(/^\s*EXPECTED_TIMELINE:\s*.+\s*$/im, "")
+        .replace(/^\s*BID_BUDGET:\s*.+\s*$/im, "")
+        .replace(/^\s*-{3,}\s*$/m, "")
+        .trim();
+    }
+    return {
+      bid: bid || text,
+      expectedTimeline: (timelineMatch?.[1] || "").trim(),
+      bidBudget: (budgetMatch?.[1] || "").trim(),
+    };
+  }
+
+  private async generateBid(body: GenerateBidRequest): Promise<GenerateBidResult> {
     if (!this.db) throw new Error("DB not ready");
     const model = (body.model?.trim() || cfg.ai.openrouterModel || OPENROUTER_DEFAULT_MODEL).trim();
     const style = (body.style ?? "").trim();
     if (!style) throw new Error("Bid style is empty");
     const p = body.project;
     if (!p?.title) throw new Error("Invalid project payload");
-    const language = normalizeBidLanguage(body.language);
+    const matchProjectLanguage = body.matchProjectLanguage === true;
+    const language = matchProjectLanguage ? null : normalizeBidLanguage(body.language);
+
+    const languageInstructions = matchProjectLanguage
+      ? [
+          "LANGUAGE (critical): Detect the language of the project DESCRIPTION/content body — not the title.",
+          "If the title is English but the description is another language, write the bid body in that description language.",
+          "If description is empty, use the dominant language of whatever project text is available (still prefer body over title).",
+          "Write the bid body in that detected language only. Do not mix languages or default to English unless the content itself is English.",
+          "Keep EXPECTED_TIMELINE and BID_BUDGET lines in English labels as specified below (values may match the bid language).",
+        ]
+      : [
+          `Write the bid body in ${language}. Use natural, professional ${language}.`,
+          "Keep EXPECTED_TIMELINE and BID_BUDGET lines in English labels as specified below (values may be in the bid language).",
+        ];
 
     const prompt = [
       "You are an expert freelancer writing a proposal (bid) for a Freelancer.com project.",
       "Write a concise, high-converting bid in plain text (no markdown).",
-      `Write the entire bid in ${language}. Use natural, professional ${language}.`,
-      "Keep it under 1800 characters unless the style explicitly requests longer.",
+      ...languageInstructions,
+      "Keep the bid body under 1800 characters unless the style explicitly requests longer.",
       "Include a short greeting, 2-4 bullet points of relevant experience/plan, 1-2 clarifying questions, and a friendly call to action.",
       "Do not mention that you are an AI.",
+      "",
+      "OUTPUT FORMAT (strict — first two lines, then a blank line, then the bid body):",
+      "EXPECTED_TIMELINE: <realistic delivery timeline based on scope, e.g. 5-7 days>",
+      "BID_BUDGET: <your professional bid price based on scope/skills — NOT any client-listed budget>",
+      "",
+      "<bid body starts here>",
+      "",
+      "CRITICAL: A client project budget is intentionally omitted from this prompt. Propose your own realistic timeline and price from the scope/description only. Never invent or mirror a client budget range.",
       "",
       "=== BID STYLE (follow strictly) ===",
       style,
@@ -568,7 +617,6 @@ export class DashboardServer {
       "=== PROJECT ===",
       `Title: ${p.title}`,
       `URL: ${p.url ?? "(none)"}`,
-      `Budget: ${p.budgetText ?? "(unknown)"}`,
       `Skills: ${p.skills?.join(", ") || "(unknown)"}`,
       `Client: ${p.clientName ?? "(unknown)"}`,
       `Client country: ${p.clientCountry ?? "(unknown)"}`,
@@ -578,13 +626,14 @@ export class DashboardServer {
       `Description: ${p.description ?? "(none)"}`,
     ].join("\n");
 
-    return openRouterChatCompletion({
+    const raw = await openRouterChatCompletion({
       store: this.db.createOpenRouterKeyStore(),
       model,
       baseUrl: cfg.ai.openrouterBaseUrl,
       temperature: 0.3,
       messages: [{ role: "user", content: prompt }],
     });
+    return this.parseGeneratedBid(raw);
   }
 
   requestClientProfileScrape(req: ClientProfileScrapeRequest): void {
@@ -1192,18 +1241,25 @@ export class DashboardServer {
               styleId?: string;
               model?: string;
               language?: string;
+              matchProjectLanguage?: boolean;
             };
             const styleId = (body.styleId ?? "").trim();
             if (!styleId) throw new Error("Missing styleId");
             const style = this.db.getStyle(username, styleId);
             if (!style?.text?.trim()) throw new Error("Bid style is empty");
-            const bid = await this.generateBid({
+            const generated = await this.generateBid({
               model: body.model?.trim() || style.bidModel,
               language: body.language,
+              matchProjectLanguage: body.matchProjectLanguage === true,
               style: style.text,
               project: body.project,
             });
-            const out: GenerateBidResponse = { ok: true, bid };
+            const out: GenerateBidResponse = {
+              ok: true,
+              bid: generated.bid,
+              expectedTimeline: generated.expectedTimeline,
+              bidBudget: generated.bidBudget,
+            };
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify(out));
           } catch (e) {
@@ -2036,6 +2092,7 @@ export class DashboardServer {
         margin-bottom: 8px;
       }
       .bidLabelRow .label { margin-bottom: 0; }
+      .bidLabelActions { display: inline-flex; align-items: center; gap: 6px; }
       .iconBtn {
         appearance: none;
         display: inline-flex;
@@ -2052,6 +2109,79 @@ export class DashboardServer {
       }
       .iconBtn:hover:not(:disabled) { background: var(--btnHover); color: var(--text); }
       .iconBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+      .bidOfferGrid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      @media (max-width: 720px) {
+        .bidOfferGrid { grid-template-columns: 1fr; }
+      }
+      .bidMetaOut {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: var(--input);
+        color: var(--text);
+        font-size: 14px;
+        min-height: 40px;
+        box-sizing: border-box;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+      .switchRow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .switchRowText { min-width: 0; }
+      .switchRowTitle { font-size: 14px; font-weight: 700; color: var(--text); }
+      .switchRowHint { margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.35; }
+      .switch {
+        position: relative;
+        display: inline-flex;
+        flex-shrink: 0;
+        width: 44px;
+        height: 26px;
+      }
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+        position: absolute;
+      }
+      .switchSlider {
+        position: absolute;
+        inset: 0;
+        cursor: pointer;
+        background: var(--btn);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      .switchSlider::before {
+        content: "";
+        position: absolute;
+        width: 20px;
+        height: 20px;
+        left: 2px;
+        top: 2px;
+        border-radius: 50%;
+        background: var(--text);
+        transition: transform 0.15s ease;
+      }
+      .switch input:checked + .switchSlider {
+        background: rgba(50, 136, 255, 0.35);
+        border-color: var(--accent);
+      }
+      .switch input:checked + .switchSlider::before {
+        transform: translateX(18px);
+        background: var(--accent);
+      }
+      .bidLanguageField.hidden { display: none; }
       .grid { display:grid; grid-template-columns: 1fr; gap: 12px; }
       .panel {
         border: 1px solid var(--border);

@@ -17,8 +17,11 @@
   let selectedStyleId = "";
   let stylePickerMode = "dropdown";
   let bidLanguage = "English";
+  /** Default on: AI matches project description language. */
+  let matchProjectLanguage = true;
   const STYLE_PICKER_MODE_KEY = "fh_stylePickerMode";
   const BID_LANGUAGE_KEY = "fh_bidLanguage";
+  const MATCH_PROJECT_LANG_KEY = "fh_matchProjectLanguage";
   let selectedProjectId = "";
   let eventSource = null;
   let feedReady = false;
@@ -437,17 +440,63 @@
     } catch {}
   }
 
+  function loadMatchProjectLanguage() {
+    try {
+      const v = localStorage.getItem(MATCH_PROJECT_LANG_KEY);
+      if (v === "false") matchProjectLanguage = false;
+      else if (v === "true") matchProjectLanguage = true;
+    } catch {}
+  }
+
+  function saveMatchProjectLanguage(on) {
+    matchProjectLanguage = Boolean(on);
+    try {
+      localStorage.setItem(MATCH_PROJECT_LANG_KEY, matchProjectLanguage ? "true" : "false");
+    } catch {}
+  }
+
   function getSelectedBidLanguage() {
     const el = document.getElementById("bidLanguage");
     const v = (el?.value || bidLanguage || settings?.defaultBidLanguage || "English").trim();
     return v || "English";
   }
 
+  function syncBidLanguageUi() {
+    const selectWrap = document.getElementById("bidLanguageField");
+    const sw = document.getElementById("matchProjectLanguage");
+    const on = Boolean(sw?.checked);
+    if (selectWrap) selectWrap.classList.toggle("hidden", on);
+  }
+
+  function renderBidOfferDisplay() {
+    return `
+      <div class="bidOfferGrid">
+        <div class="field" style="margin-top:0;">
+          <div class="label">Expected timeline</div>
+          <div id="bidExpectedTimelineOut" class="bidMetaOut">—</div>
+        </div>
+        <div class="field" style="margin-top:0;">
+          <div class="label">Budget</div>
+          <div id="bidBudgetOut" class="bidMetaOut">—</div>
+        </div>
+      </div>
+    `;
+  }
+
   function renderBidLanguageField() {
     const langs = settings?.bidLanguageOptions || ["English"];
     const cur = bidLanguage || settings?.defaultBidLanguage || "English";
     return `
-      <div class="field">
+      <div class="switchRow">
+        <div class="switchRowText">
+          <div class="switchRowTitle">Same language with project detail</div>
+        </div>
+        <label class="switch" title="Same language with project detail">
+          <input id="matchProjectLanguage" type="checkbox"${matchProjectLanguage ? " checked" : ""} />
+          <span class="switchSlider"></span>
+        </label>
+      </div>
+      <div id="bidLanguageField" class="field bidLanguageField${matchProjectLanguage ? " hidden" : ""}">
         <div class="label">Bid language</div>
         <select id="bidLanguage" class="bidLanguageSelect">
           ${langs.map((lang) => `<option value="${esc(lang)}"${lang === cur ? " selected" : ""}>${esc(lang)}</option>`).join("")}
@@ -459,6 +508,10 @@
   function bindBidLanguage() {
     document.getElementById("bidLanguage")?.addEventListener("change", (ev) => {
       saveBidLanguage(ev.currentTarget?.value || ev.target?.value || "English");
+    });
+    document.getElementById("matchProjectLanguage")?.addEventListener("change", (ev) => {
+      saveMatchProjectLanguage(Boolean(ev.currentTarget?.checked));
+      syncBidLanguageUi();
     });
   }
 
@@ -1047,18 +1100,19 @@
     switchAdminTab(adminTab);
   }
 
-  async function copyText(text) {
+  async function copyText(text, opts) {
     const s = String(text || "");
+    const silent = Boolean(opts?.silent);
     if (!s) {
-      toast("Nothing to copy");
-      return;
+      if (!silent) toast("Nothing to copy");
+      return false;
     }
     // Clipboard API only works on HTTPS or localhost — not on http://192.168.x.x:port
     if (navigator.clipboard && window.isSecureContext) {
       try {
         await navigator.clipboard.writeText(s);
-        toast("Copied");
-        return;
+        if (!silent) toast("Copied");
+        return true;
       } catch {
         /* fall through */
       }
@@ -1076,9 +1130,11 @@
       ta.setSelectionRange(0, s.length);
       const ok = document.execCommand("copy");
       document.body.removeChild(ta);
-      toast(ok ? "Copied" : "Copy failed — select text manually");
+      if (!silent) toast(ok ? "Copied" : "Copy failed — select text manually");
+      return ok;
     } catch {
-      toast("Copy failed — select text manually");
+      if (!silent) toast("Copy failed — select text manually");
+      return false;
     }
   }
 
@@ -1105,16 +1161,25 @@
     const fromSelect = stylePickEl?.value || "";
     if (fromSelect) selectedStyleId = fromSelect;
     if (!selectedStyleId) throw new Error("Select a bid style first");
+    const matchLang = Boolean(document.getElementById("matchProjectLanguage")?.checked);
+    // Strip client-suggested budget so the model cannot mirror it.
+    const projectForBid = { ...project };
+    delete projectForBid.budgetText;
     const j = await api("/api/bid", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        project,
+        project: projectForBid,
         styleId: selectedStyleId,
-        language: getSelectedBidLanguage(),
+        matchProjectLanguage: matchLang,
+        language: matchLang ? undefined : getSelectedBidLanguage(),
       }),
     });
-    return String(j.bid || "");
+    return {
+      bid: String(j.bid || ""),
+      expectedTimeline: String(j.expectedTimeline || "").trim(),
+      bidBudget: String(j.bidBudget || "").trim(),
+    };
   }
 
   function slackSendButtonLabel() {
@@ -2550,6 +2615,7 @@
     ensureNotificationPermission();
     loadStylePickerMode();
     loadBidLanguage();
+    loadMatchProjectLanguage();
     const styles = settings?.styles || [];
     render(`
       <div class="layout">
@@ -2564,6 +2630,7 @@
         </div>
         <aside class="panel panelScroll pane">
           <h2>Main</h2>
+          ${renderBidOfferDisplay()}
           ${renderStylePickerField(styles)}
           ${renderBidLanguageField()}
           <div class="field">
@@ -2576,12 +2643,21 @@
           <div class="field">
             <div class="bidLabelRow">
               <div class="label">Generated bid</div>
-              <button id="copyBid" class="iconBtn" type="button" disabled title="Copy bid" aria-label="Copy bid">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
-                  <path d="M6 15H5a2 2 0 01-2-2V5a2 2 0 012-2h8a2 2 0 012 2v1" stroke="currentColor" stroke-width="1.8"/>
-                </svg>
-              </button>
+              <div class="bidLabelActions">
+                <button id="copyBid" class="iconBtn" type="button" disabled title="Copy bid" aria-label="Copy bid">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
+                    <path d="M6 15H5a2 2 0 01-2-2V5a2 2 0 012-2h8a2 2 0 012 2v1" stroke="currentColor" stroke-width="1.8"/>
+                  </svg>
+                </button>
+                <button id="cutBid" class="iconBtn" type="button" disabled title="Cut bid" aria-label="Cut bid">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <circle cx="6" cy="6" r="2.5" stroke="currentColor" stroke-width="1.8"/>
+                    <circle cx="6" cy="18" r="2.5" stroke="currentColor" stroke-width="1.8"/>
+                    <path d="M20 4L8.5 15.5M14.5 14.5L20 20M8.5 8.5L12 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                  </svg>
+                </button>
+              </div>
             </div>
             <div id="bidOut" class="resultBox">Use “Write bid” on a project row, or “Write bid (manual)”.</div>
           </div>
@@ -2594,7 +2670,10 @@
 
     const listEl = document.getElementById("list");
     const bidOut = document.getElementById("bidOut");
+    const timelineOut = document.getElementById("bidExpectedTimelineOut");
+    const budgetOut = document.getElementById("bidBudgetOut");
     const copyBtn = document.getElementById("copyBid");
+    const cutBtn = document.getElementById("cutBid");
     const writeManualBtn = document.getElementById("writeBidManual");
     const manualBoxEl = document.getElementById("manualBox");
 
@@ -2602,9 +2681,33 @@
       await copyText(String(bidOut.textContent || ""));
     });
 
-    function setBid(text, isErr) {
+    cutBtn.addEventListener("click", async () => {
+      const text = String(bidOut.textContent || "");
+      if (!text || text.startsWith("Error:") || text === "Generating…") return;
+      const ok = await copyText(text, { silent: true });
+      if (!ok) {
+        toast("Cut failed — select text manually");
+        return;
+      }
+      setBid("Use “Write bid” on a project row, or “Write bid (manual)”.", true);
+      toast("Cut");
+    });
+
+    function setBidMeta(timeline, budget) {
+      if (timelineOut) timelineOut.textContent = timeline || "—";
+      if (budgetOut) budgetOut.textContent = budget || "—";
+    }
+
+    function setBid(text, isErr, meta) {
       bidOut.textContent = text;
-      copyBtn.disabled = !text || isErr;
+      const empty = !text || isErr || text === "Generating…";
+      copyBtn.disabled = empty;
+      cutBtn.disabled = empty;
+      if (isErr || text === "Generating…") {
+        setBidMeta(text === "Generating…" ? "…" : "—", text === "Generating…" ? "…" : "—");
+      } else if (meta) {
+        setBidMeta(meta.expectedTimeline, meta.bidBudget);
+      }
     }
 
     function rerenderList() {
@@ -2648,8 +2751,8 @@
           (async () => {
             try {
               setBid("Generating…", false);
-              const bid = await generateBidForProject(item.project);
-              setBid(bid, false);
+              const generated = await generateBidForProject(item.project);
+              setBid(generated.bid, false, generated);
             } catch (err) {
               setBid("Error: " + (err?.message || String(err)), true);
             }
@@ -2700,8 +2803,8 @@
         const firstLine = raw.split("\n").map((l) => l.trim()).find(Boolean) || "Manual project";
         const title = firstLine.length > 4 ? firstLine.slice(0, 120) : "Manual project";
         const project = { title, url: url || "manual://input", description: raw, skills: [] };
-        const bid = await generateBidForProject(project);
-        setBid(bid, false);
+        const generated = await generateBidForProject(project);
+        setBid(generated.bid, false, generated);
       } catch (err) {
         setBid("Error: " + (err?.message || String(err)), true);
       }
