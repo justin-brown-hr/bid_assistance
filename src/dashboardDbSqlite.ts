@@ -896,6 +896,21 @@ export class DashboardDbSqlite {
     if (r.changes === 0) throw new Error("OpenRouter key not found");
   }
 
+  deleteOpenRouterKeys(ids: number[]): number {
+    if (!this.db) throw new Error("DB not connected");
+    const unique = [...new Set(ids.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))];
+    if (!unique.length) return 0;
+    const del = this.db.prepare("DELETE FROM openrouter_keys WHERE id = ?");
+    const tx = this.db.transaction((list: number[]) => {
+      let n = 0;
+      for (const id of list) {
+        n += del.run(id).changes;
+      }
+      return n;
+    });
+    return tx(unique);
+  }
+
   countActiveOpenRouterKeys(): number {
     if (!this.db) throw new Error("DB not connected");
     const row = this.db.prepare(

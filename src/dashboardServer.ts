@@ -813,6 +813,33 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/admin/openrouter-keys/bulk-delete" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const body = (await this.readJsonBody(req)) as { ids?: unknown };
+            const ids = Array.isArray(body.ids)
+              ? body.ids.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+              : [];
+            if (!ids.length) throw new Error("No key ids provided");
+            const deleted = this.db.deleteOpenRouterKeys(ids);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({
+              ok: true,
+              deleted,
+              activeCount: this.db.countActiveOpenRouterKeys(),
+            }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname.startsWith("/api/admin/openrouter-keys/") && req.method === "POST") {
         (async () => {
           try {
@@ -1973,7 +2000,61 @@ export class DashboardServer {
         color: var(--text);
         resize: vertical;
       }
-      .adminOpenrouterSection { margin-bottom: 8px; }
+      .adminOpenrouterSection {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-bottom: 0;
+      }
+      .adminOpenrouterSection > .card {
+        flex-shrink: 0;
+      }
+      .adminOpenrouterSection .navTableShell {
+        flex: 1;
+        min-height: 220px;
+      }
+      .adminTabPanel > .adminPageSub {
+        flex-shrink: 0;
+      }
+      .navColCheck {
+        width: 40px;
+        text-align: center;
+      }
+      .navTableCell.navColCheck,
+      .navTableHead.navColCheck {
+        text-align: center;
+        overflow: visible;
+      }
+      .navKeySelectCb,
+      #openrouterKeysSelectAll {
+        width: 15px;
+        height: 15px;
+        cursor: pointer;
+        accent-color: var(--accent, #3288ff);
+      }
+      .navToolbarBtnDanger {
+        color: #b91c1c;
+        border-color: rgba(220, 38, 38, 0.45);
+      }
+      .navToolbarBtnDanger:hover:not(:disabled) {
+        background: rgba(220, 38, 38, 0.1);
+        color: #dc2626;
+        border-color: rgba(220, 38, 38, 0.55);
+      }
+      .navToolbarBtn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .navTableSelectedCount {
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 4.5em;
+      }
+      .navTableRowSelected .navTableCell {
+        background: rgba(50, 136, 255, 0.1) !important;
+      }
       .navRowBtn {
         appearance: none;
         padding: 2px 10px;
@@ -2093,6 +2174,42 @@ export class DashboardServer {
       }
       .bidLabelRow .label { margin-bottom: 0; }
       .bidLabelActions { display: inline-flex; align-items: center; gap: 6px; }
+      .bidCounterWrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-left: auto;
+        margin-right: 8px;
+      }
+      .bidCounterLabel {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+      .bidCounterValue {
+        min-width: 1.5em;
+        padding: 2px 8px;
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--text);
+        background: var(--input);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      .bidCounterClearBtn {
+        appearance: none;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--btn);
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .bidCounterClearBtn:hover { background: var(--btnHover); color: var(--text); }
       .iconBtn {
         appearance: none;
         display: inline-flex;
@@ -2807,13 +2924,13 @@ export class DashboardServer {
         gap: 2px;
       }
       .clientStar { display: block; flex-shrink: 0; }
-      .clientStarOn { color: #29b2fe; }
-      .clientStarOff { color: #9ca3af; }
-      :root[data-theme="dark"] .clientStarOff { color: #5c6573; }
+      .clientStarOn { color: #d10074; }
+      .clientStarOff { color: #e8b4cc; }
+      :root[data-theme="dark"] .clientStarOff { color: #6b4558; }
       .clientRatingNum {
         font-size: 14px;
         font-weight: 600;
-        color: var(--muted);
+        color: var(--text);
         min-width: 28px;
       }
       .clientReviewMsg {
@@ -2822,9 +2939,9 @@ export class DashboardServer {
         gap: 4px;
         font-size: 14px;
         font-weight: 600;
-        color: var(--muted);
+        color: var(--text);
       }
-      .clientReviewMsgIco { display: block; flex-shrink: 0; opacity: 0.85; }
+      .clientReviewMsgIco { display: block; flex-shrink: 0; color: #ff8000; }
       .listRowCountry { color: var(--text-desc); font-weight: 500; }
       .listRowCountryFlag {
         display: inline-flex;

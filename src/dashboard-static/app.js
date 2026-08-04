@@ -22,6 +22,8 @@
   const STYLE_PICKER_MODE_KEY = "fh_stylePickerMode";
   const BID_LANGUAGE_KEY = "fh_bidLanguage";
   const MATCH_PROJECT_LANG_KEY = "fh_matchProjectLanguage";
+  const BID_COUNTER_KEY = "fh_bidCopyCount";
+  let bidCopyCount = 0;
   let selectedProjectId = "";
   let eventSource = null;
   let feedReady = false;
@@ -515,6 +517,47 @@
     });
   }
 
+  function loadBidCounter() {
+    try {
+      const v = Number(localStorage.getItem(BID_COUNTER_KEY));
+      bidCopyCount = Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+    } catch {
+      bidCopyCount = 0;
+    }
+  }
+
+  function saveBidCounter() {
+    try {
+      localStorage.setItem(BID_COUNTER_KEY, String(bidCopyCount));
+    } catch {}
+  }
+
+  function updateBidCounterUi() {
+    const el = document.getElementById("bidCopyCount");
+    if (el) el.textContent = String(bidCopyCount);
+  }
+
+  function incrementBidCounter() {
+    bidCopyCount += 1;
+    saveBidCounter();
+    updateBidCounterUi();
+  }
+
+  function clearBidCounter() {
+    bidCopyCount = 0;
+    saveBidCounter();
+    updateBidCounterUi();
+    toast("Counter cleared");
+  }
+
+  function isCopyableBidText(text) {
+    const s = String(text || "");
+    if (!s || s === "Generating…") return false;
+    if (s.startsWith("Error:")) return false;
+    if (s.startsWith("Use “Write bid”")) return false;
+    return true;
+  }
+
   function route() {
     const h = window.location.hash || "#/app";
     return h.startsWith("#") ? h.slice(1) : h;
@@ -770,7 +813,8 @@
   }
 
   function renderOpenRouterKeysPanel(keys, activeCount) {
-    const rows = (keys || [])
+    const list = keys || [];
+    const rows = list
       .map((k, i) => {
         const statusClass = k.status === "exhausted" ? "navKeyExhausted" : "navKeyOk";
         const statusLabel = k.status === "exhausted" ? "run out" : "active";
@@ -780,7 +824,10 @@
             : "";
         const err = k.lastError ? esc(k.lastError.slice(0, 80)) : "—";
         return `
-          <tr class="navTableRow">
+          <tr class="navTableRow" data-key-row="${k.id}">
+            <td class="navTableCell navColCheck">
+              <input type="checkbox" class="navKeySelectCb" data-or-key-id="${k.id}" aria-label="Select key ${i + 1}" />
+            </td>
             <td class="navTableCell navColNum">${i + 1}</td>
             <td class="navTableCell"><code>${esc(k.masked)}</code></td>
             <td class="navTableCell navColStatus">
@@ -798,7 +845,7 @@
 
     return `
       <div class="adminOpenrouterSection">
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom:0;">
           <div class="field">
             <div class="label">Add keys (one per line)</div>
             <textarea id="openrouterKeysInput" class="openrouterKeysInput" placeholder="sk-or-v1-...&#10;sk-or-v1-..."></textarea>
@@ -813,9 +860,11 @@
             <div class="navTableToolbarLeft">
               <span class="navTableIcon" aria-hidden="true">🔑</span>
               <span class="navTableName">openrouter_keys</span>
+              <span class="navTableCount">${list.length} key(s)${activeCount != null ? ` · ${activeCount} active` : ""}</span>
             </div>
             <div class="navTableToolbarRight">
-              <span class="navTableCount">${(keys || []).length} key(s)</span>
+              <span id="openrouterKeysSelectedCount" class="navTableSelectedCount"></span>
+              <button type="button" class="navToolbarBtn navToolbarBtnDanger" id="openrouterKeysDeleteSelectedBtn" disabled title="Delete selected keys">Delete selected</button>
               <button type="button" class="navToolbarBtn" id="openrouterKeysRefreshBtn" title="Refresh">Refresh</button>
             </div>
           </div>
@@ -825,6 +874,9 @@
                 ? `<table class="navTable">
               <thead>
                 <tr>
+                  <th class="navTableHead navColCheck">
+                    <input type="checkbox" id="openrouterKeysSelectAll" title="Select all" aria-label="Select all keys" />
+                  </th>
                   <th class="navTableHead navColNum">#</th>
                   <th class="navTableHead">key</th>
                   <th class="navTableHead">status</th>
@@ -842,6 +894,72 @@
     `;
   }
 
+  function updateOpenRouterKeysBulkUi(host) {
+    const root = host || document.getElementById("adminOpenrouterKeys");
+    if (!root) return;
+    const boxes = [...root.querySelectorAll(".navKeySelectCb")];
+    const checked = boxes.filter((cb) => cb.checked);
+    const n = checked.length;
+    const deleteBtn = document.getElementById("openrouterKeysDeleteSelectedBtn");
+    const countEl = document.getElementById("openrouterKeysSelectedCount");
+    const selectAll = document.getElementById("openrouterKeysSelectAll");
+    if (deleteBtn) deleteBtn.disabled = n === 0;
+    if (countEl) countEl.textContent = n ? `${n} selected` : "";
+    if (selectAll) {
+      selectAll.checked = boxes.length > 0 && checked.length === boxes.length;
+      selectAll.indeterminate = checked.length > 0 && checked.length < boxes.length;
+    }
+    root.querySelectorAll("[data-key-row]").forEach((row) => {
+      const id = row.getAttribute("data-key-row");
+      const cb = root.querySelector(`.navKeySelectCb[data-or-key-id="${id}"]`);
+      row.classList.toggle("navTableRowSelected", Boolean(cb?.checked));
+    });
+  }
+
+  function bindOpenRouterKeysSelection(host) {
+    const selectAll = document.getElementById("openrouterKeysSelectAll");
+    selectAll?.addEventListener("change", () => {
+      const on = Boolean(selectAll.checked);
+      host.querySelectorAll(".navKeySelectCb").forEach((cb) => {
+        cb.checked = on;
+      });
+      updateOpenRouterKeysBulkUi(host);
+    });
+    host.querySelectorAll(".navKeySelectCb").forEach((cb) => {
+      cb.addEventListener("change", () => updateOpenRouterKeysBulkUi(host));
+    });
+    document.getElementById("openrouterKeysDeleteSelectedBtn")?.addEventListener("click", async () => {
+      const ids = [...host.querySelectorAll(".navKeySelectCb:checked")]
+        .map((cb) => Number(cb.getAttribute("data-or-key-id")))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (!ids.length) return;
+      if (!(await appConfirm(
+        `Delete ${ids.length} API key${ids.length === 1 ? "" : "s"}?`,
+        { title: "Delete API keys", confirmText: "Delete", danger: true },
+      ))) return;
+      const deleteBtn = document.getElementById("openrouterKeysDeleteSelectedBtn");
+      if (deleteBtn) {
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = "Deleting…";
+      }
+      try {
+        const j = await api("/api/admin/openrouter-keys/bulk-delete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ids }),
+        });
+        toast(`Deleted ${j.deleted} key${j.deleted === 1 ? "" : "s"}`);
+        await loadOpenRouterKeysPanel();
+        await loadSettings();
+      } catch (e) {
+        toast("Error: " + (e?.message || String(e)));
+        updateOpenRouterKeysBulkUi(host);
+      } finally {
+        if (deleteBtn) deleteBtn.textContent = "Delete selected";
+      }
+    });
+  }
+
   async function loadOpenRouterKeysPanel() {
     const host = document.getElementById("adminOpenrouterKeys");
     if (!host || !isAdminUser()) return;
@@ -849,6 +967,8 @@
     try {
       const j = await api("/api/admin/openrouter-keys");
       host.innerHTML = renderOpenRouterKeysPanel(j.keys || [], j.activeCount ?? 0);
+      bindOpenRouterKeysSelection(host);
+      updateOpenRouterKeysBulkUi(host);
       document.getElementById("openrouterKeysRefreshBtn")?.addEventListener("click", () => void loadOpenRouterKeysPanel());
       document.getElementById("openrouterKeysAddBtn")?.addEventListener("click", async () => {
         const keys = document.getElementById("openrouterKeysInput")?.value || "";
@@ -2121,7 +2241,10 @@
         <div class="clientCardMetaRow clientCardReviewEarn">
           ${renderStarRating(p.reviewRate ?? 0)}
           <span class="clientRatingNum">${rating}</span>
-          <span class="clientReviewCount">(${reviews} review${reviews === 1 ? "" : "s"})</span>
+          <span class="clientReviewMsg" title="${reviews} review${reviews === 1 ? "" : "s"}">
+            ${reviewMsgIconSvg()}
+            <span>${reviews}</span>
+          </span>
           <span class="clientReviewEarnSep muted">·</span>
           <span class="clientEarningLabel muted">Earned</span>
           <span class="clientEarningValue">${earning}</span>
@@ -2403,8 +2526,11 @@
   }
 
   function reviewMsgIconSvg() {
-    return `<svg class="clientReviewMsgIco" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    return `<svg class="clientReviewMsgIco" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z" fill="currentColor"/>
+      <circle cx="8" cy="10" r="1.2" fill="#fff"/>
+      <circle cx="12" cy="10" r="1.2" fill="#fff"/>
+      <circle cx="16" cy="10" r="1.2" fill="#fff"/>
     </svg>`;
   }
 
@@ -2616,6 +2742,7 @@
     loadStylePickerMode();
     loadBidLanguage();
     loadMatchProjectLanguage();
+    loadBidCounter();
     const styles = settings?.styles || [];
     render(`
       <div class="layout">
@@ -2643,6 +2770,11 @@
           <div class="field">
             <div class="bidLabelRow">
               <div class="label">Generated bid</div>
+              <div class="bidCounterWrap">
+                <span class="bidCounterLabel">Bids</span>
+                <span id="bidCopyCount" class="bidCounterValue">0</span>
+                <button id="clearBidCounter" class="bidCounterClearBtn" type="button" title="Clear counter">Clear</button>
+              </div>
               <div class="bidLabelActions">
                 <button id="copyBid" class="iconBtn" type="button" disabled title="Copy bid" aria-label="Copy bid">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -2667,6 +2799,8 @@
 
     bindStylePicker();
     bindBidLanguage();
+    updateBidCounterUi();
+    document.getElementById("clearBidCounter")?.addEventListener("click", () => clearBidCounter());
 
     const listEl = document.getElementById("list");
     const bidOut = document.getElementById("bidOut");
@@ -2678,17 +2812,21 @@
     const manualBoxEl = document.getElementById("manualBox");
 
     copyBtn.addEventListener("click", async () => {
-      await copyText(String(bidOut.textContent || ""));
+      const text = String(bidOut.textContent || "");
+      if (!isCopyableBidText(text)) return;
+      const ok = await copyText(text);
+      if (ok) incrementBidCounter();
     });
 
     cutBtn.addEventListener("click", async () => {
       const text = String(bidOut.textContent || "");
-      if (!text || text.startsWith("Error:") || text === "Generating…") return;
+      if (!isCopyableBidText(text)) return;
       const ok = await copyText(text, { silent: true });
       if (!ok) {
         toast("Cut failed — select text manually");
         return;
       }
+      incrementBidCounter();
       setBid("Use “Write bid” on a project row, or “Write bid (manual)”.", true);
       toast("Cut");
     });

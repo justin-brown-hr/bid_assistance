@@ -11,6 +11,7 @@ module.exports = {
       max_memory_restart: "800M",
       env: {
         NODE_ENV: "production",
+        LOGIN_HEADLESS: "true",
       },
     },
   ],
