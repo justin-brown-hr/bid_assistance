@@ -28,6 +28,7 @@
   let adminAnalyticsPeriod = "today";
   let adminAnalyticsSort = "username";
   let adminAnalyticsOrder = "asc";
+  let analyticsRowsState = [];
   let eventSource = null;
   let feedReady = false;
   function toast(msg) {
@@ -1530,6 +1531,19 @@
     });
   }
 
+  function calcAnalyticsSummary(rows) {
+    const bidCount = rows.length;
+    const chatCount = rows.filter((r) => r.isChat).length;
+    const awardCount = rows.filter((r) => r.isAward).length;
+    return {
+      bidCount,
+      chatCount,
+      awardCount,
+      chatPct: bidCount ? Math.round((chatCount / bidCount) * 1000) / 10 : 0,
+      awardPct: bidCount ? Math.round((awardCount / bidCount) * 1000) / 10 : 0,
+    };
+  }
+
   function renderAnalyticsSummaryCards(summary) {
     const s = summary || {};
     return `
@@ -1550,6 +1564,12 @@
         </div>
       </div>
     `;
+  }
+
+  function updateAnalyticsSummaryDom(host, summary) {
+    const grid = host?.querySelector(".analyticsSummaryGrid");
+    if (!grid) return;
+    grid.outerHTML = renderAnalyticsSummaryCards(summary);
   }
 
   function renderAnalyticsRows(rows) {
@@ -1593,23 +1613,34 @@
     `;
   }
 
-  function bindAnalyticsFlagCheckboxes(host, onUpdate) {
+  function bindAnalyticsFlagCheckboxes(host) {
     host?.querySelectorAll(".analyticsFlagCb").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const id = Number(cb.getAttribute("data-analytics-id"));
         const flag = cb.getAttribute("data-flag");
         if (!Number.isFinite(id) || !flag) return;
         const body = flag === "chat" ? { isChat: cb.checked } : { isAward: cb.checked };
+        cb.disabled = true;
         try {
-          await api("/api/analytics/" + encodeURIComponent(String(id)), {
+          const j = await api("/api/analytics/" + encodeURIComponent(String(id)), {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
           });
-          if (onUpdate) await onUpdate();
+          const row = j.row;
+          const idx = analyticsRowsState.findIndex((r) => r.id === id);
+          if (idx >= 0 && row) {
+            analyticsRowsState[idx] = row;
+          } else if (idx >= 0) {
+            if (flag === "chat") analyticsRowsState[idx].isChat = cb.checked;
+            else analyticsRowsState[idx].isAward = cb.checked;
+          }
+          updateAnalyticsSummaryDom(host, calcAnalyticsSummary(analyticsRowsState));
         } catch (e) {
           cb.checked = !cb.checked;
           toast("Error: " + (e?.message || String(e)));
+        } finally {
+          cb.disabled = false;
         }
       });
     });
@@ -1620,6 +1651,7 @@
     host.textContent = "Loading…";
     try {
       const j = await api("/api/analytics?period=" + encodeURIComponent(analyticsPeriod));
+      analyticsRowsState = j.rows || [];
       host.innerHTML = `
         <div class="analyticsPeriodRow">${renderAnalyticsPeriodButtons(analyticsPeriod, "analytics")}</div>
         ${renderAnalyticsSummaryCards(j.summary)}
@@ -1627,10 +1659,10 @@
           <div class="navTableToolbar">
             <div class="navTableToolbarLeft">
               <span class="navTableName">copied_bids</span>
-              <span class="navTableCount">${(j.rows || []).length} project(s)</span>
+              <span class="navTableCount">${analyticsRowsState.length} project(s)</span>
             </div>
           </div>
-          <div class="analyticsTableViewport">${renderAnalyticsRows(j.rows || [])}</div>
+          <div class="analyticsTableViewport">${renderAnalyticsRows(analyticsRowsState)}</div>
         </div>
         <p class="analyticsPageSub" style="margin-top:10px;">Day boundary: 05:00–05:00 Japan time.</p>
       `;
@@ -1640,7 +1672,7 @@
           void loadAnalyticsContent(host);
         });
       });
-      bindAnalyticsFlagCheckboxes(host, () => loadAnalyticsContent(host));
+      bindAnalyticsFlagCheckboxes(host);
     } catch (e) {
       host.textContent = "Error: " + (e?.message || String(e));
     }
