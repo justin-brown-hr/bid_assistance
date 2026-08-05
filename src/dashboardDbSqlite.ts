@@ -3,7 +3,15 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-import type { ClientProfile, ClientProfileFilters } from "./types.js";
+import type {
+  AdminUserAnalyticsRow,
+  BidAnalyticsAction,
+  BidAnalyticsRow,
+  BidAnalyticsSummary,
+  ClientProfile,
+  ClientProfileFilters,
+} from "./types.js";
+import { normalizeAnalyticsPeriod, periodRange, type AnalyticsPeriod } from "./analytics/japanDay.js";
 import { hashApiKey, maskApiKey, type OpenRouterKeyStore } from "./ai/openrouter.js";
 import { BID_MODEL_SEED, OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
 
@@ -124,6 +132,23 @@ export class DashboardDbSqlite {
 
       CREATE INDEX IF NOT EXISTS idx_bid_models_enabled
         ON bid_models(enabled, sort_order ASC, id ASC);
+
+      CREATE TABLE IF NOT EXISTS bid_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+        project_id TEXT NOT NULL,
+        project_title TEXT,
+        project_url TEXT,
+        action TEXT NOT NULL,
+        is_chat INTEGER NOT NULL DEFAULT 0,
+        is_award INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(username, project_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bid_analytics_user_time
+        ON bid_analytics(username, created_at DESC);
     `);
 
     try {
@@ -1220,6 +1245,240 @@ export class DashboardDbSqlite {
     });
     tx(usernames);
     return deleted;
+  }
+
+  private bidAnalyticsPeriodClause(period: AnalyticsPeriod): { sql: string; params: number[] } {
+    const range = periodRange(period);
+    if (!range) return { sql: "", params: [] };
+    return {
+      sql: " AND created_at >= ? AND created_at < ?",
+      params: [range.from, range.to],
+    };
+  }
+
+  recordBidAnalytics(
+    username: string,
+    data: {
+      projectId: string;
+      projectTitle?: string | null;
+      projectUrl?: string | null;
+      action: BidAnalyticsAction;
+    },
+  ): BidAnalyticsRow {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const projectId = String(data.projectId ?? "").trim();
+    if (!user || !projectId) throw new Error("Invalid bid analytics payload");
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO bid_analytics (
+        username, project_id, project_title, project_url, action,
+        is_chat, is_award, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+      ON CONFLICT(username, project_id) DO UPDATE SET
+        project_title = excluded.project_title,
+        project_url = excluded.project_url,
+        action = excluded.action,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `).run(
+      user,
+      projectId,
+      data.projectTitle ?? null,
+      data.projectUrl ?? null,
+      data.action,
+      now,
+      now,
+    );
+    const row = this.db.prepare(`
+      SELECT id, username, project_id, project_title, project_url, action,
+             is_chat, is_award, created_at, updated_at
+      FROM bid_analytics WHERE username = ? AND project_id = ?
+    `).get(user, projectId) as {
+      id: number;
+      username: string;
+      project_id: string;
+      project_title: string | null;
+      project_url: string | null;
+      action: string;
+      is_chat: number;
+      is_award: number;
+      created_at: number;
+      updated_at: number;
+    };
+    return this.mapBidAnalyticsRow(row);
+  }
+
+  private mapBidAnalyticsRow(r: {
+    id: number;
+    project_id: string;
+    project_title: string | null;
+    project_url: string | null;
+    action: string;
+    is_chat: number;
+    is_award: number;
+    created_at: number;
+    updated_at: number;
+  }): BidAnalyticsRow {
+    return {
+      id: r.id,
+      projectId: r.project_id,
+      projectTitle: r.project_title,
+      projectUrl: r.project_url,
+      action: r.action === "cut" ? "cut" : "copy",
+      isChat: r.is_chat === 1,
+      isAward: r.is_award === 1,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
+
+  listBidAnalytics(username: string, period: AnalyticsPeriod): BidAnalyticsRow[] {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const { sql, params } = this.bidAnalyticsPeriodClause(period);
+    const rows = this.db.prepare(`
+      SELECT id, project_id, project_title, project_url, action,
+             is_chat, is_award, created_at, updated_at
+      FROM bid_analytics
+      WHERE username = ?${sql}
+      ORDER BY created_at DESC
+    `).all(user, ...params) as Array<{
+      id: number;
+      project_id: string;
+      project_title: string | null;
+      project_url: string | null;
+      action: string;
+      is_chat: number;
+      is_award: number;
+      created_at: number;
+      updated_at: number;
+    }>;
+    return rows.map((r) => this.mapBidAnalyticsRow(r));
+  }
+
+  getBidAnalyticsSummary(username: string, period: AnalyticsPeriod): BidAnalyticsSummary {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const { sql, params } = this.bidAnalyticsPeriodClause(period);
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS bid_count,
+        SUM(CASE WHEN is_chat = 1 THEN 1 ELSE 0 END) AS chat_count,
+        SUM(CASE WHEN is_award = 1 THEN 1 ELSE 0 END) AS award_count
+      FROM bid_analytics
+      WHERE username = ?${sql}
+    `).get(user, ...params) as { bid_count: number; chat_count: number; award_count: number };
+    const bidCount = Number(row.bid_count) || 0;
+    const chatCount = Number(row.chat_count) || 0;
+    const awardCount = Number(row.award_count) || 0;
+    return {
+      bidCount,
+      chatCount,
+      awardCount,
+      chatPct: bidCount ? Math.round((chatCount / bidCount) * 1000) / 10 : 0,
+      awardPct: bidCount ? Math.round((awardCount / bidCount) * 1000) / 10 : 0,
+    };
+  }
+
+  listBidAnalyticsProjectIds(username: string): string[] {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const rows = this.db.prepare(
+      "SELECT project_id FROM bid_analytics WHERE username = ?",
+    ).all(user) as Array<{ project_id: string }>;
+    return rows.map((r) => r.project_id);
+  }
+
+  updateBidAnalyticsFlags(
+    username: string,
+    id: number,
+    flags: { isChat?: boolean; isAward?: boolean },
+  ): BidAnalyticsRow {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const existing = this.db.prepare(`
+      SELECT id, project_id, project_title, project_url, action,
+             is_chat, is_award, created_at, updated_at
+      FROM bid_analytics WHERE id = ? AND username = ?
+    `).get(id, user) as {
+      id: number;
+      project_id: string;
+      project_title: string | null;
+      project_url: string | null;
+      action: string;
+      is_chat: number;
+      is_award: number;
+      created_at: number;
+      updated_at: number;
+    } | undefined;
+    if (!existing) throw new Error("Analytics row not found");
+    const isChat = flags.isChat !== undefined ? (flags.isChat ? 1 : 0) : existing.is_chat;
+    const isAward = flags.isAward !== undefined ? (flags.isAward ? 1 : 0) : existing.is_award;
+    const now = Date.now();
+    this.db.prepare(`
+      UPDATE bid_analytics SET is_chat = ?, is_award = ?, updated_at = ? WHERE id = ? AND username = ?
+    `).run(isChat, isAward, now, id, user);
+    return this.mapBidAnalyticsRow({
+      ...existing,
+      is_chat: isChat,
+      is_award: isAward,
+      updated_at: now,
+    });
+  }
+
+  listAdminBidAnalytics(
+    period: AnalyticsPeriod,
+    sort: "username" | "bidCount" | "chatPct" | "awardPct",
+    order: "asc" | "desc",
+  ): AdminUserAnalyticsRow[] {
+    if (!this.db) throw new Error("DB not connected");
+    const range = periodRange(period);
+    const periodSql = range ? " AND b.created_at >= ? AND b.created_at < ?" : "";
+    const periodParams = range ? [range.from, range.to] : [];
+    const rows = this.db.prepare(`
+      SELECT
+        u.username,
+        COUNT(b.id) AS bid_count,
+        SUM(CASE WHEN b.is_chat = 1 THEN 1 ELSE 0 END) AS chat_count,
+        SUM(CASE WHEN b.is_award = 1 THEN 1 ELSE 0 END) AS award_count
+      FROM users u
+      LEFT JOIN bid_analytics b ON b.username = u.username${periodSql}
+      GROUP BY u.username
+    `).all(...periodParams) as Array<{
+      username: string;
+      bid_count: number;
+      chat_count: number;
+      award_count: number;
+    }>;
+
+    const mapped = rows.map((r) => {
+      const bidCount = Number(r.bid_count) || 0;
+      const chatCount = Number(r.chat_count) || 0;
+      const awardCount = Number(r.award_count) || 0;
+      return {
+        username: r.username,
+        bidCount,
+        chatCount,
+        awardCount,
+        chatPct: bidCount ? Math.round((chatCount / bidCount) * 1000) / 10 : 0,
+        awardPct: bidCount ? Math.round((awardCount / bidCount) * 1000) / 10 : 0,
+      };
+    });
+
+    const dir = order === "asc" ? 1 : -1;
+    mapped.sort((a, b) => {
+      let av: string | number = a.username;
+      let bv: string | number = b.username;
+      if (sort === "bidCount") { av = a.bidCount; bv = b.bidCount; }
+      if (sort === "chatPct") { av = a.chatPct; bv = b.chatPct; }
+      if (sort === "awardPct") { av = a.awardPct; bv = b.awardPct; }
+      if (typeof av === "string" && typeof bv === "string") {
+        return av.localeCompare(bv) * dir;
+      }
+      return ((av as number) - (bv as number)) * dir;
+    });
+    return mapped;
   }
 }
 

@@ -22,9 +22,13 @@
   const STYLE_PICKER_MODE_KEY = "fh_stylePickerMode";
   const BID_LANGUAGE_KEY = "fh_bidLanguage";
   const MATCH_PROJECT_LANG_KEY = "fh_matchProjectLanguage";
-  const BID_COUNTER_KEY = "fh_bidCopyCount";
-  let bidCopyCount = 0;
   let selectedProjectId = "";
+  let activeBidProject = null;
+  const skippedProjectIds = new Set();
+  let analyticsPeriod = "today";
+  let adminAnalyticsPeriod = "today";
+  let adminAnalyticsSort = "username";
+  let adminAnalyticsOrder = "asc";
   let eventSource = null;
   let feedReady = false;
   function toast(msg) {
@@ -247,17 +251,72 @@
   async function bootstrapFeed() {
     stopEventStream();
     try {
-      const j = await api("/api/items");
-      (j.items || []).forEach((it) => state.set(it.id, it));
+      const [itemsJ, skippedJ] = await Promise.all([
+        api("/api/items"),
+        api("/api/analytics/skipped-ids").catch(() => ({ projectIds: [] })),
+      ]);
+      (itemsJ.items || []).forEach((it) => state.set(it.id, it));
+      skippedProjectIds.clear();
+      (skippedJ.projectIds || []).forEach((id) => skippedProjectIds.add(String(id)));
       refreshListIfOnApp();
       if (route() === "/app" && !selectedProjectId) {
-        const first = (j.items || [])[0];
+        const first = visibleProjectItems()[0];
         if (first?.id) selectedProjectId = first.id;
         refreshListIfOnApp();
       }
     } catch {}
     feedReady = true;
     startEventStream();
+  }
+
+  function visibleProjectItems() {
+    return Array.from(state.values())
+      .filter((it) => {
+        const pid = it.project?.id;
+        return pid && !skippedProjectIds.has(String(pid));
+      })
+      .sort((a, b) => (b.foundAt || 0) - (a.foundAt || 0));
+  }
+
+  async function recordBidAnalytics(action) {
+    const p = activeBidProject;
+    if (!p?.id) return;
+    try {
+      const j = await api("/api/analytics/events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: String(p.id),
+          projectTitle: p.title || "",
+          projectUrl: p.url || "",
+          action,
+        }),
+      });
+      skippedProjectIds.add(String(p.id));
+      return j.row;
+    } catch (e) {
+      console.error("[analytics]", e);
+      return null;
+    }
+  }
+
+  const ANALYTICS_PERIODS = [
+    { id: "today", label: "Today" },
+    { id: "yesterday", label: "Yesterday" },
+    { id: "this_week", label: "This week" },
+    { id: "last_week", label: "Last week" },
+    { id: "this_month", label: "This month" },
+    { id: "all", label: "All" },
+  ];
+
+  function renderAnalyticsPeriodButtons(current, prefix) {
+    return ANALYTICS_PERIODS.map(
+      (p) => `<button type="button" class="analyticsPeriodBtn${p.id === current ? " analyticsPeriodBtnActive" : ""}" data-${prefix}-period="${esc(p.id)}">${esc(p.label)}</button>`,
+    ).join("");
+  }
+
+  function fmtAnalyticsPct(n) {
+    return `${Number(n || 0).toFixed(1)}%`;
   }
 
   function esc(s) {
@@ -517,39 +576,6 @@
     });
   }
 
-  function loadBidCounter() {
-    try {
-      const v = Number(localStorage.getItem(BID_COUNTER_KEY));
-      bidCopyCount = Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
-    } catch {
-      bidCopyCount = 0;
-    }
-  }
-
-  function saveBidCounter() {
-    try {
-      localStorage.setItem(BID_COUNTER_KEY, String(bidCopyCount));
-    } catch {}
-  }
-
-  function updateBidCounterUi() {
-    const el = document.getElementById("bidCopyCount");
-    if (el) el.textContent = String(bidCopyCount);
-  }
-
-  function incrementBidCounter() {
-    bidCopyCount += 1;
-    saveBidCounter();
-    updateBidCounterUi();
-  }
-
-  function clearBidCounter() {
-    bidCopyCount = 0;
-    saveBidCounter();
-    updateBidCounterUi();
-    toast("Counter cleared");
-  }
-
   function isCopyableBidText(text) {
     const s = String(text || "");
     if (!s || s === "Generating…") return false;
@@ -577,11 +603,13 @@
     const r = route();
     const projectsLink = document.getElementById("headerProjectsLink");
     const clientsLink = document.getElementById("headerClientsLink");
+    const analyticsLink = document.getElementById("headerAnalyticsLink");
     projectsLink?.classList.toggle("headerNavLinkActive", r === "/app");
     if (clientsLink) {
       clientsLink.classList.remove("hidden");
       clientsLink.classList.toggle("headerNavLinkActive", r === "/clients");
     }
+    analyticsLink?.classList.toggle("headerNavLinkActive", r === "/analytics");
   }
 
   function userIconSvg() {
@@ -1134,16 +1162,21 @@
   }
 
   function switchAdminTab(tab) {
-    adminTab = tab === "keys" ? "keys" : tab === "models" ? "models" : "users";
+    adminTab = tab === "keys" ? "keys"
+      : tab === "models" ? "models"
+      : tab === "analytics" ? "analytics"
+      : "users";
     document.querySelectorAll(".adminTab").forEach((btn) => {
       btn.classList.toggle("adminTabActive", btn.getAttribute("data-tab") === adminTab);
     });
     document.getElementById("adminTabUsers")?.classList.toggle("hidden", adminTab !== "users");
     document.getElementById("adminTabKeys")?.classList.toggle("hidden", adminTab !== "keys");
     document.getElementById("adminTabModels")?.classList.toggle("hidden", adminTab !== "models");
+    document.getElementById("adminTabAnalytics")?.classList.toggle("hidden", adminTab !== "analytics");
     if (adminTab === "users") void mountAdminUsersPanel();
     else if (adminTab === "keys") void loadOpenRouterKeysPanel();
-    else void loadBidModelsPanel();
+    else if (adminTab === "models") void loadBidModelsPanel();
+    else if (adminTab === "analytics") void loadAdminAnalyticsPanel();
   }
 
   async function mountAdminUsersPanel() {
@@ -1489,6 +1522,209 @@
     });
   }
 
+  function renderAnalyticsSummaryCards(summary) {
+    const s = summary || {};
+    return `
+      <div class="analyticsSummaryGrid">
+        <div class="analyticsSummaryCard">
+          <div class="analyticsSummaryLabel">Bids</div>
+          <div class="analyticsSummaryValue">${esc(String(s.bidCount ?? 0))}</div>
+        </div>
+        <div class="analyticsSummaryCard">
+          <div class="analyticsSummaryLabel">Chat</div>
+          <div class="analyticsSummaryValue">${esc(String(s.chatCount ?? 0))}</div>
+          <div class="analyticsSummarySub">${fmtAnalyticsPct(s.chatPct)}</div>
+        </div>
+        <div class="analyticsSummaryCard">
+          <div class="analyticsSummaryLabel">Award</div>
+          <div class="analyticsSummaryValue">${esc(String(s.awardCount ?? 0))}</div>
+          <div class="analyticsSummarySub">${fmtAnalyticsPct(s.awardPct)}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAnalyticsRows(rows) {
+    if (!rows?.length) {
+      return `<div class="navTableEmpty">No copied bids in this period.</div>`;
+    }
+    return `
+      <table class="navTable">
+        <thead>
+          <tr>
+            <th class="navTableHead">Project</th>
+            <th class="navTableHead navColCenter">Chat</th>
+            <th class="navTableHead navColCenter">Award</th>
+            <th class="navTableHead navColDate">When</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r) => {
+            const title = esc(r.projectTitle || r.projectId || "—");
+            const url = r.projectUrl ? esc(r.projectUrl) : "#";
+            const when = r.createdAt ? esc(fmtDateTime(r.createdAt)) : "—";
+            return `
+              <tr class="navTableRow">
+                <td class="navTableCell navColWrap">
+                  ${r.projectUrl ? `<a href="${url}" target="_blank" rel="noopener">${title}</a>` : title}
+                </td>
+                <td class="navTableCell navColCenter">
+                  <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="chat"${r.isChat ? " checked" : ""} />
+                </td>
+                <td class="navTableCell navColCenter">
+                  <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="award"${r.isAward ? " checked" : ""} />
+                </td>
+                <td class="navTableCell navColDate muted">${when}</td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function bindAnalyticsFlagCheckboxes(host, onUpdate) {
+    host?.querySelectorAll(".analyticsFlagCb").forEach((cb) => {
+      cb.addEventListener("change", async () => {
+        const id = Number(cb.getAttribute("data-analytics-id"));
+        const flag = cb.getAttribute("data-flag");
+        if (!Number.isFinite(id) || !flag) return;
+        const body = flag === "chat" ? { isChat: cb.checked } : { isAward: cb.checked };
+        try {
+          await api("/api/analytics/" + encodeURIComponent(String(id)), {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (onUpdate) await onUpdate();
+        } catch (e) {
+          cb.checked = !cb.checked;
+          toast("Error: " + (e?.message || String(e)));
+        }
+      });
+    });
+  }
+
+  async function loadAnalyticsContent(host) {
+    if (!host) return;
+    host.textContent = "Loading…";
+    try {
+      const j = await api("/api/analytics?period=" + encodeURIComponent(analyticsPeriod));
+      host.innerHTML = `
+        <div class="analyticsPeriodRow">${renderAnalyticsPeriodButtons(analyticsPeriod, "analytics")}</div>
+        ${renderAnalyticsSummaryCards(j.summary)}
+        <div class="analyticsTableShell">
+          <div class="navTableToolbar">
+            <div class="navTableToolbarLeft">
+              <span class="navTableName">copied_bids</span>
+              <span class="navTableCount">${(j.rows || []).length} project(s)</span>
+            </div>
+          </div>
+          <div class="analyticsTableViewport">${renderAnalyticsRows(j.rows || [])}</div>
+        </div>
+        <p class="analyticsPageSub" style="margin-top:10px;">Day boundary: 05:00–05:00 Japan time.</p>
+      `;
+      host.querySelectorAll("[data-analytics-period]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          analyticsPeriod = btn.getAttribute("data-analytics-period") || "today";
+          void loadAnalyticsContent(host);
+        });
+      });
+      bindAnalyticsFlagCheckboxes(host, () => loadAnalyticsContent(host));
+    } catch (e) {
+      host.textContent = "Error: " + (e?.message || String(e));
+    }
+  }
+
+  function renderAnalyticsPage() {
+    setMainLayout("default");
+    updateHeaderSession();
+    render(`
+      <div class="analyticsPage">
+        <div class="analyticsPageHeader">
+          <h2>Analytics</h2>
+          <p class="analyticsPageSub">Projects you copied or cut — your bids only</p>
+        </div>
+        <div id="analyticsContent" class="adminTableHost">Loading…</div>
+      </div>
+    `);
+    void loadAnalyticsContent(document.getElementById("analyticsContent"));
+  }
+
+  function adminAnalyticsSortLabel(col) {
+    if (adminAnalyticsSort !== col) return "";
+    return adminAnalyticsOrder === "asc" ? " ▲" : " ▼";
+  }
+
+  async function loadAdminAnalyticsPanel() {
+    const host = document.getElementById("adminAnalyticsHost");
+    if (!host || !isAdminUser()) return;
+    host.textContent = "Loading…";
+    try {
+      const q = new URLSearchParams({
+        period: adminAnalyticsPeriod,
+        sort: adminAnalyticsSort,
+        order: adminAnalyticsOrder,
+      });
+      const j = await api("/api/admin/analytics?" + q.toString());
+      const rows = j.rows || [];
+      host.innerHTML = `
+        <div class="analyticsPeriodRow">${renderAnalyticsPeriodButtons(adminAnalyticsPeriod, "admin-analytics")}</div>
+        <div class="analyticsTableShell">
+          <div class="navTableToolbar">
+            <div class="navTableToolbarLeft">
+              <span class="navTableName">user_analytics</span>
+              <span class="navTableCount">${rows.length} user(s)</span>
+            </div>
+          </div>
+          <div class="analyticsTableViewport">
+            <table class="navTable">
+              <thead>
+                <tr>
+                  <th class="navTableHead"><button type="button" class="analyticsSortBtn" data-admin-sort="username">User${adminAnalyticsSortLabel("username")}</button></th>
+                  <th class="navTableHead navColCenter"><button type="button" class="analyticsSortBtn" data-admin-sort="bidCount">Bids${adminAnalyticsSortLabel("bidCount")}</button></th>
+                  <th class="navTableHead navColCenter"><button type="button" class="analyticsSortBtn" data-admin-sort="chatPct">Chat %${adminAnalyticsSortLabel("chatPct")}</button></th>
+                  <th class="navTableHead navColCenter"><button type="button" class="analyticsSortBtn" data-admin-sort="awardPct">Award %${adminAnalyticsSortLabel("awardPct")}</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map((r) => `
+                  <tr class="navTableRow">
+                    <td class="navTableCell"><code>${esc(r.username)}</code></td>
+                    <td class="navTableCell navColCenter">${esc(String(r.bidCount ?? 0))}</td>
+                    <td class="navTableCell navColCenter">${fmtAnalyticsPct(r.chatPct)} <span class="muted">(${esc(String(r.chatCount ?? 0))})</span></td>
+                    <td class="navTableCell navColCenter">${fmtAnalyticsPct(r.awardPct)} <span class="muted">(${esc(String(r.awardCount ?? 0))})</span></td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p class="analyticsPageSub" style="margin-top:10px;">Day boundary: 05:00–05:00 Japan time.</p>
+      `;
+      host.querySelectorAll("[data-admin-analytics-period]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          adminAnalyticsPeriod = btn.getAttribute("data-admin-analytics-period") || "today";
+          void loadAdminAnalyticsPanel();
+        });
+      });
+      host.querySelectorAll("[data-admin-sort]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const col = btn.getAttribute("data-admin-sort") || "username";
+          if (adminAnalyticsSort === col) {
+            adminAnalyticsOrder = adminAnalyticsOrder === "asc" ? "desc" : "asc";
+          } else {
+            adminAnalyticsSort = col;
+            adminAnalyticsOrder = col === "username" ? "asc" : "desc";
+          }
+          void loadAdminAnalyticsPanel();
+        });
+      });
+    } catch (e) {
+      host.textContent = "Error: " + (e?.message || String(e));
+    }
+  }
+
   function renderAdmin() {
     if (!isAdminUser()) {
       nav("/app");
@@ -1506,6 +1742,7 @@
           <button type="button" class="adminTab ${adminTab === "users" ? "adminTabActive" : ""}" data-tab="users">Users</button>
           <button type="button" class="adminTab ${adminTab === "keys" ? "adminTabActive" : ""}" data-tab="keys">API Keys</button>
           <button type="button" class="adminTab ${adminTab === "models" ? "adminTabActive" : ""}" data-tab="models">Models</button>
+          <button type="button" class="adminTab ${adminTab === "analytics" ? "adminTabActive" : ""}" data-tab="analytics">Analytics</button>
         </div>
         <div id="adminTabUsers" class="adminTabPanel${adminTab === "users" ? "" : " hidden"}">
           <div id="adminUserList" class="adminTableHost">Loading…</div>
@@ -1517,6 +1754,9 @@
         <div id="adminTabModels" class="adminTabPanel${adminTab === "models" ? "" : " hidden"}">
           <p class="adminPageSub" style="margin-bottom:12px;">Enable or disable models shown to users on bid styles</p>
           <div id="adminBidModels" class="adminTableHost">Loading…</div>
+        </div>
+        <div id="adminTabAnalytics" class="adminTabPanel${adminTab === "analytics" ? "" : " hidden"}">
+          <div id="adminAnalyticsHost" class="adminTableHost">Loading…</div>
         </div>
       </div>
     `);
@@ -2742,7 +2982,6 @@
     loadStylePickerMode();
     loadBidLanguage();
     loadMatchProjectLanguage();
-    loadBidCounter();
     const styles = settings?.styles || [];
     render(`
       <div class="layout">
@@ -2769,13 +3008,7 @@
           </div>
           <div class="field">
             <div class="bidLabelRow">
-              <div class="label">Generated bid</div>
-              <div class="bidCounterWrap">
-                <span class="bidCounterLabel">Bids</span>
-                <span id="bidCopyCount" class="bidCounterValue">0</span>
-                <button id="clearBidCounter" class="bidCounterClearBtn" type="button" title="Clear counter">Clear</button>
-              </div>
-              <div class="bidLabelActions">
+              <div class="bidLabelActions" style="margin-left:auto;">
                 <button id="copyBid" class="iconBtn" type="button" disabled title="Copy bid" aria-label="Copy bid">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                     <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
@@ -2799,8 +3032,6 @@
 
     bindStylePicker();
     bindBidLanguage();
-    updateBidCounterUi();
-    document.getElementById("clearBidCounter")?.addEventListener("click", () => clearBidCounter());
 
     const listEl = document.getElementById("list");
     const bidOut = document.getElementById("bidOut");
@@ -2815,7 +3046,9 @@
       const text = String(bidOut.textContent || "");
       if (!isCopyableBidText(text)) return;
       const ok = await copyText(text);
-      if (ok) incrementBidCounter();
+      if (!ok) return;
+      await recordBidAnalytics("copy");
+      rerenderList();
     });
 
     cutBtn.addEventListener("click", async () => {
@@ -2826,8 +3059,10 @@
         toast("Cut failed — select text manually");
         return;
       }
-      incrementBidCounter();
+      await recordBidAnalytics("cut");
       setBid("Use “Write bid” on a project row, or “Write bid (manual)”.", true);
+      activeBidProject = null;
+      rerenderList();
       toast("Cut");
     });
 
@@ -2850,12 +3085,12 @@
 
     function rerenderList() {
       if (!listEl) return;
-      const items = Array.from(state.values()).sort((a, b) => (b.foundAt || 0) - (a.foundAt || 0));
+      const items = visibleProjectItems();
       const max = 50;
       const sliced = items.slice(0, max);
-      listEl.innerHTML = sliced
-        .map((it) => renderListRow(it, it.id === selectedProjectId))
-        .join("");
+      listEl.innerHTML = sliced.length
+        ? sliced.map((it) => renderListRow(it, it.id === selectedProjectId)).join("")
+        : `<div class="navTableEmpty">No new projects — copied ones are hidden.</div>`;
     }
 
     listEl?.addEventListener("click", (e) => {
@@ -2889,9 +3124,11 @@
           (async () => {
             try {
               setBid("Generating…", false);
+              activeBidProject = item.project || null;
               const generated = await generateBidForProject(item.project);
               setBid(generated.bid, false, generated);
             } catch (err) {
+              activeBidProject = null;
               setBid("Error: " + (err?.message || String(err)), true);
             }
           })();
@@ -2940,10 +3177,12 @@
         const url = (urlMatch?.[0] || "").replace(/[)\],.]+$/, "");
         const firstLine = raw.split("\n").map((l) => l.trim()).find(Boolean) || "Manual project";
         const title = firstLine.length > 4 ? firstLine.slice(0, 120) : "Manual project";
-        const project = { title, url: url || "manual://input", description: raw, skills: [] };
+        const project = { title, url: url || "manual://input", description: raw, skills: [], id: url || ("manual:" + title.slice(0, 40)) };
+        activeBidProject = project;
         const generated = await generateBidForProject(project);
         setBid(generated.bid, false, generated);
       } catch (err) {
+        activeBidProject = null;
         setBid("Error: " + (err?.message || String(err)), true);
       }
     });
@@ -2975,6 +3214,7 @@
     if (!eventSource) await bootstrapFeed();
     if (r === "/admin") return renderAdmin();
     if (r === "/clients") return renderClients();
+    if (r === "/analytics") return renderAnalyticsPage();
     if (r === "/profile") return renderProfile();
     return renderApp();
   }

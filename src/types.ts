@@ -89,3 +89,29 @@ export type ClientProfileFilters = {
   updatedTo?: number;
 };
 
+export type BidAnalyticsAction = "copy" | "cut";
+
+export type BidAnalyticsRow = {
+  id: number;
+  projectId: string;
+  projectTitle: string | null;
+  projectUrl: string | null;
+  action: BidAnalyticsAction;
+  isChat: boolean;
+  isAward: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type BidAnalyticsSummary = {
+  bidCount: number;
+  chatCount: number;
+  awardCount: number;
+  chatPct: number;
+  awardPct: number;
+};
+
+export type AdminUserAnalyticsRow = BidAnalyticsSummary & {
+  username: string;
+};
+

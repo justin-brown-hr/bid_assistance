@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import { DashboardDbSqlite } from "./dashboardDbSqlite.js";
 import { ClientProfileService } from "./clientProfiles/clientProfileService.js";
 import type { ClientProfileScrapeRequest, ClientProfileFilters } from "./types.js";
+import { normalizeAnalyticsPeriod } from "./analytics/japanDay.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
@@ -1419,6 +1420,129 @@ export class DashboardServer {
         return;
       }
 
+      if (url.pathname === "/api/analytics/skipped-ids" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const ids = this.db.listBidAnalyticsProjectIds(username);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, projectIds: ids }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/analytics" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const period = normalizeAnalyticsPeriod(url.searchParams.get("period"));
+            const summary = this.db.getBidAnalyticsSummary(username, period);
+            const rows = this.db.listBidAnalytics(username, period);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, period, summary, rows }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/analytics/events" && req.method === "POST") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const body = (await this.readJsonBody(req)) as {
+              projectId?: string;
+              projectTitle?: string;
+              projectUrl?: string;
+              action?: string;
+            };
+            const projectId = String(body.projectId ?? "").trim();
+            if (!projectId) throw new Error("projectId required");
+            const action = body.action === "cut" ? "cut" : "copy";
+            const row = this.db.recordBidAnalytics(username, {
+              projectId,
+              projectTitle: body.projectTitle?.trim() || null,
+              projectUrl: body.projectUrl?.trim() || null,
+              action,
+            });
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, row }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/analytics/") && req.method === "PATCH") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            const username = this.verifySession(req.headers.cookie);
+            if (!username) throw new Error("Not logged in");
+            const suffix = url.pathname.slice("/api/analytics/".length);
+            const id = Number(suffix);
+            if (!Number.isFinite(id)) throw new Error("Invalid analytics id");
+            const body = (await this.readJsonBody(req)) as { isChat?: boolean; isAward?: boolean };
+            const row = this.db.updateBidAnalyticsFlags(username, id, {
+              isChat: body.isChat,
+              isAward: body.isAward,
+            });
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, row }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/admin/analytics" && req.method === "GET") {
+        (async () => {
+          try {
+            if (!this.db) throw new Error("DB not ready");
+            this.requireAdmin(req.headers.cookie);
+            const period = normalizeAnalyticsPeriod(url.searchParams.get("period"));
+            const sortRaw = url.searchParams.get("sort") ?? "username";
+            const sort = sortRaw === "bidCount" || sortRaw === "chatPct" || sortRaw === "awardPct"
+              ? sortRaw
+              : "username";
+            const order = url.searchParams.get("order") === "desc" ? "desc" : "asc";
+            const rows = this.db.listAdminBidAnalytics(period, sort, order);
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: true, period, sort, order, rows }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
       if (url.pathname === "/events") {
         res.writeHead(200, {
           "content-type": "text/event-stream",
@@ -2210,6 +2334,90 @@ export class DashboardServer {
         cursor: pointer;
       }
       .bidCounterClearBtn:hover { background: var(--btnHover); color: var(--text); }
+      .analyticsPage {
+        max-width: 1100px;
+        margin: 0 auto;
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+      .analyticsPageHeader { flex-shrink: 0; margin-bottom: 12px; }
+      .analyticsPageHeader h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+      .analyticsPageSub { margin: 0; font-size: 12px; color: var(--muted); }
+      .analyticsPeriodRow {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 14px;
+        flex-shrink: 0;
+      }
+      .analyticsPeriodBtn {
+        appearance: none;
+        border: 1px solid var(--border);
+        background: var(--btn);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 7px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .analyticsPeriodBtn:hover { background: var(--btnHover); }
+      .analyticsPeriodBtnActive {
+        border-color: var(--accent);
+        background: rgba(50, 136, 255, 0.12);
+        color: var(--link);
+      }
+      .analyticsSummaryGrid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+        flex-shrink: 0;
+      }
+      @media (max-width: 720px) {
+        .analyticsSummaryGrid { grid-template-columns: 1fr; }
+      }
+      .analyticsSummaryCard {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        padding: 12px 14px;
+      }
+      .analyticsSummaryLabel { font-size: 12px; color: var(--muted); font-weight: 600; }
+      .analyticsSummaryValue { margin-top: 4px; font-size: 22px; font-weight: 700; color: var(--text); }
+      .analyticsSummarySub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+      .analyticsTableShell {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--nav-border);
+        border-radius: 4px;
+        background: var(--nav-bg);
+        overflow: hidden;
+      }
+      .analyticsTableViewport { flex: 1; min-height: 0; overflow: auto; }
+      .analyticsFlagCb {
+        width: 15px;
+        height: 15px;
+        cursor: pointer;
+        accent-color: var(--accent, #3288ff);
+      }
+      .analyticsSortBtn {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        padding: 0;
+      }
+      .analyticsSortBtn:hover { color: var(--link); }
       .iconBtn {
         appearance: none;
         display: inline-flex;
@@ -3068,6 +3276,7 @@ export class DashboardServer {
       <nav class="headerNav hidden" id="headerNav" aria-label="Main navigation">
         <a href="#/app" class="headerNavLink" id="headerProjectsLink">Projects</a>
         <a href="#/clients" class="headerNavLink" id="headerClientsLink">Clients</a>
+        <a href="#/analytics" class="headerNavLink" id="headerAnalyticsLink">Analytics</a>
       </nav>
       </div>
       <div class="headerActions">
