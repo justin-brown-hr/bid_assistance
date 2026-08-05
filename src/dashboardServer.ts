@@ -1493,7 +1493,7 @@ export class DashboardServer {
         return;
       }
 
-      if (url.pathname.startsWith("/api/analytics/") && req.method === "PATCH") {
+      if (url.pathname.startsWith("/api/analytics/") && (req.method === "PATCH" || req.method === "DELETE")) {
         (async () => {
           try {
             if (!this.db) throw new Error("DB not ready");
@@ -1502,13 +1502,24 @@ export class DashboardServer {
             const suffix = url.pathname.slice("/api/analytics/".length);
             const id = Number(suffix);
             if (!Number.isFinite(id)) throw new Error("Invalid analytics id");
+            const period = normalizeAnalyticsPeriod(url.searchParams.get("period"));
+
+            if (req.method === "DELETE") {
+              this.db.deleteBidAnalytics(username, id);
+              const summary = this.db.getBidAnalyticsSummary(username, period);
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.end(JSON.stringify({ ok: true, summary }));
+              return;
+            }
+
             const body = (await this.readJsonBody(req)) as { isChat?: boolean; isAward?: boolean };
             const row = this.db.updateBidAnalyticsFlags(username, id, {
               isChat: body.isChat,
               isAward: body.isAward,
             });
+            const summary = this.db.getBidAnalyticsSummary(username, period);
             res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: true, row }));
+            res.end(JSON.stringify({ ok: true, row, summary }));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             res.statusCode = msg === "Not logged in" ? 401 : 400;

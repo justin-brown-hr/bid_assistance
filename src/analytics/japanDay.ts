@@ -59,12 +59,6 @@ export function analyticsDayStartMs(ms: number): number {
   return jstDayStartMs(d.year, d.month, d.day);
 }
 
-/** 05:00 JST at the start of today's JST calendar date. */
-function jstCalendarTodayStartMs(ms: number): number {
-  const p = jstParts(ms);
-  return jstDayStartMs(p.year, p.month, p.day);
-}
-
 function addCalendarDays(year: number, month: number, day: number, delta: number): JstParts {
   const dt = new Date(Date.UTC(year, month - 1, day));
   dt.setUTCDate(dt.getUTCDate() + delta);
@@ -76,42 +70,43 @@ function addCalendarDays(year: number, month: number, day: number, delta: number
   };
 }
 
-/** Monday 05:00 JST for the calendar week that contains `ms`. */
-function calendarWeekMondayStartMs(ms: number): number {
-  const p = jstParts(ms);
-  const dt = new Date(Date.UTC(p.year, p.month - 1, p.day));
+/** Monday 05:00 JST for the analytics week that contains `ms`. */
+function analyticsWeekMondayStartMs(ms: number): number {
+  const d = jstAnalyticsDate(ms);
+  const dt = new Date(Date.UTC(d.year, d.month - 1, d.day));
   const dow = dt.getUTCDay(); // 0 Sun .. 6 Sat
   const daysFromMon = (dow + 6) % 7;
-  const mon = addCalendarDays(p.year, p.month, p.day, -daysFromMon);
+  const mon = addCalendarDays(d.year, d.month, d.day, -daysFromMon);
   return jstDayStartMs(mon.year, mon.month, mon.day);
 }
 
 /**
- * Period ranges use 05:00 JST boundaries on the Japan calendar:
- * - today: today 05:00 JST → tomorrow 05:00 JST
- * - yesterday: yesterday 05:00 JST → today 05:00 JST
+ * Period ranges (all 05:00 JST boundaries, using analytics calendar date):
+ *
+ * Before 05:00 JST on 8/6 → "today" is 8/5 (window: 8/5 05:00 → 8/6 05:00).
+ * After 05:00 JST on 8/6 → "today" is 8/6 (window: 8/6 05:00 → 8/7 05:00).
  */
 export function periodRange(period: AnalyticsPeriod, nowMs = Date.now()): { from: number; to: number } | null {
   if (period === "all") return null;
-  const todayStart = jstCalendarTodayStartMs(nowMs);
+  const dayStart = analyticsDayStartMs(nowMs);
   if (period === "today") {
-    return { from: todayStart, to: todayStart + MS_DAY };
+    return { from: dayStart, to: dayStart + MS_DAY };
   }
   if (period === "yesterday") {
-    return { from: todayStart - MS_DAY, to: todayStart };
+    return { from: dayStart - MS_DAY, to: dayStart };
   }
   if (period === "this_week") {
-    const from = calendarWeekMondayStartMs(nowMs);
+    const from = analyticsWeekMondayStartMs(nowMs);
     return { from, to: from + 7 * MS_DAY };
   }
   if (period === "last_week") {
-    const thisWeek = calendarWeekMondayStartMs(nowMs);
+    const thisWeek = analyticsWeekMondayStartMs(nowMs);
     return { from: thisWeek - 7 * MS_DAY, to: thisWeek };
   }
   if (period === "this_month") {
-    const p = jstParts(nowMs);
-    const from = jstDayStartMs(p.year, p.month, 1);
-    const nextMonth = p.month === 12 ? { year: p.year + 1, month: 1 } : { year: p.year, month: p.month + 1 };
+    const d = jstAnalyticsDate(nowMs);
+    const from = jstDayStartMs(d.year, d.month, 1);
+    const nextMonth = d.month === 12 ? { year: d.year + 1, month: 1 } : { year: d.year, month: d.month + 1 };
     const to = jstDayStartMs(nextMonth.year, nextMonth.month, 1);
     return { from, to };
   }

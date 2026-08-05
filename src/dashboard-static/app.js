@@ -271,7 +271,6 @@
   async function recordBidAnalytics(action) {
     const p = activeBidProject;
     if (!p?.id) return;
-    const projectUrl = analyticsProjectDetailUrl({ projectId: p.id, projectUrl: p.url || "" }) || String(p.url || "").trim();
     try {
       const j = await api("/api/analytics/events", {
         method: "POST",
@@ -279,7 +278,7 @@
         body: JSON.stringify({
           projectId: String(p.id),
           projectTitle: p.title || "",
-          projectUrl,
+          projectUrl: p.url || "",
           action,
         }),
       });
@@ -309,64 +308,9 @@
     return `${Number(n || 0).toFixed(1)}%`;
   }
 
-  /** JST wall time + analytics calendar date (day rolls at 05:00 JST). */
-  function normalizeJstHour(hour) {
-    if (hour === 24) return 0;
-    return hour;
-  }
-
-  function fmtAnalyticsWhen(ms) {
-    if (!ms) return "—";
-    try {
-      const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Tokyo",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      }).formatToParts(new Date(ms));
-      const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
-      let year = Number(get("year"));
-      let month = Number(get("month"));
-      let day = Number(get("day"));
-      const hour = normalizeJstHour(Number(get("hour")));
-      const minute = get("minute");
-      if (hour < 5) {
-        const d = new Date(Date.UTC(year, month - 1, day));
-        d.setUTCDate(d.getUTCDate() - 1);
-        year = d.getUTCFullYear();
-        month = d.getUTCMonth() + 1;
-        day = d.getUTCDate();
-      }
-      const monthLabel = new Date(Date.UTC(year, month - 1, day)).toLocaleString("en-US", {
-        month: "short",
-        timeZone: "UTC",
-      });
-      return `${monthLabel} ${day}, ${year} ${String(hour).padStart(2, "0")}:${minute}`;
-    } catch {
-      return "—";
-    }
-  }
-
-  function analyticsProjectDetailUrl(row) {
-    const rawUrl = String(row?.projectUrl || "").trim();
-    if (rawUrl && !rawUrl.startsWith("manual:")) {
-      if (/^https?:\/\//i.test(rawUrl)) return rawUrl;
-      if (rawUrl.startsWith("/")) return `https://www.freelancer.com${rawUrl}`;
-      if (/freelancer\.com\/projects\//i.test(rawUrl)) {
-        return rawUrl.startsWith("http") ? rawUrl : `https://${rawUrl.replace(/^\/+/, "")}`;
-      }
-      return `https://www.freelancer.com/projects/${rawUrl.replace(/^\/+/, "")}`;
-    }
-    const pid = String(row?.projectId || "").trim();
-    if (!pid || pid.startsWith("manual:")) return "";
-    if (/^https?:\/\//i.test(pid)) return pid;
-    if (/freelancer\.com\/projects\//i.test(pid)) {
-      return pid.startsWith("http") ? pid : `https://${pid.replace(/^\/+/, "")}`;
-    }
-    return `https://www.freelancer.com/projects/${pid.replace(/^\/+/, "")}`;
+  function analyticsApiQuery(id) {
+    return "/api/analytics/" + encodeURIComponent(String(id))
+      + "?period=" + encodeURIComponent(analyticsPeriod);
   }
 
   function esc(s) {
@@ -1572,19 +1516,6 @@
     });
   }
 
-  function calcAnalyticsSummary(rows) {
-    const bidCount = rows.length;
-    const chatCount = rows.filter((r) => r.isChat).length;
-    const awardCount = rows.filter((r) => r.isAward).length;
-    return {
-      bidCount,
-      chatCount,
-      awardCount,
-      chatPct: bidCount ? Math.round((chatCount / bidCount) * 1000) / 10 : 0,
-      awardPct: bidCount ? Math.round((awardCount / bidCount) * 1000) / 10 : 0,
-    };
-  }
-
   function renderAnalyticsSummaryCards(summary) {
     const s = summary || {};
     return `
@@ -1626,18 +1557,19 @@
             <th class="navTableHead navColCenter">Chat</th>
             <th class="navTableHead navColCenter">Award</th>
             <th class="navTableHead navColDate">When</th>
+            <th class="navTableHead navColAction">Delete</th>
           </tr>
         </thead>
         <tbody>
           ${rows.map((r, i) => {
             const title = esc(r.projectTitle || r.projectId || "—");
-            const url = analyticsProjectDetailUrl(r);
-            const when = r.createdAt ? esc(fmtAnalyticsWhen(r.createdAt)) : "—";
+            const url = r.detailUrl ? esc(r.detailUrl) : "";
+            const when = esc(r.whenLabel || "—");
             return `
-              <tr class="navTableRow">
+              <tr class="navTableRow" data-analytics-row="${r.id}">
                 <td class="navTableCell navColNum muted">${i + 1}</td>
                 <td class="navTableCell navColWrap">
-                  ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${title}</a>` : title}
+                  ${url ? `<a href="${url}" target="_blank" rel="noopener">${title}</a>` : title}
                 </td>
                 <td class="navTableCell navColCenter">
                   <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="chat"${r.isChat ? " checked" : ""} />
@@ -1646,12 +1578,24 @@
                   <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="award"${r.isAward ? " checked" : ""} />
                 </td>
                 <td class="navTableCell navColDate muted">${when}</td>
+                <td class="navTableCell navColAction">
+                  <button type="button" class="navRowBtn navRowBtnDanger analyticsDeleteBtn" data-analytics-id="${r.id}">Delete</button>
+                </td>
               </tr>
             `;
           }).join("")}
         </tbody>
       </table>
     `;
+  }
+
+  function updateAnalyticsTableDom(host) {
+    const viewport = host?.querySelector(".analyticsTableViewport");
+    const countEl = host?.querySelector(".navTableCount");
+    if (viewport) viewport.innerHTML = renderAnalyticsRows(analyticsRowsState);
+    if (countEl) countEl.textContent = `${analyticsRowsState.length} project(s)`;
+    bindAnalyticsFlagCheckboxes(host);
+    bindAnalyticsDeleteButtons(host);
   }
 
   function bindAnalyticsFlagCheckboxes(host) {
@@ -1663,25 +1607,41 @@
         const body = flag === "chat" ? { isChat: cb.checked } : { isAward: cb.checked };
         cb.disabled = true;
         try {
-          const j = await api("/api/analytics/" + encodeURIComponent(String(id)), {
+          const j = await api(analyticsApiQuery(id), {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
           });
           const row = j.row;
           const idx = analyticsRowsState.findIndex((r) => r.id === id);
-          if (idx >= 0 && row) {
-            analyticsRowsState[idx] = row;
-          } else if (idx >= 0) {
-            if (flag === "chat") analyticsRowsState[idx].isChat = cb.checked;
-            else analyticsRowsState[idx].isAward = cb.checked;
-          }
-          updateAnalyticsSummaryDom(host, calcAnalyticsSummary(analyticsRowsState));
+          if (idx >= 0 && row) analyticsRowsState[idx] = row;
+          if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
         } catch (e) {
           cb.checked = !cb.checked;
           toast("Error: " + (e?.message || String(e)));
         } finally {
           cb.disabled = false;
+        }
+      });
+    });
+  }
+
+  function bindAnalyticsDeleteButtons(host) {
+    host?.querySelectorAll(".analyticsDeleteBtn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = Number(btn.getAttribute("data-analytics-id"));
+        if (!Number.isFinite(id)) return;
+        if (!(await appConfirm("Delete this analytics row?", { title: "Delete bid", confirmText: "Delete", danger: true }))) return;
+        btn.disabled = true;
+        try {
+          const j = await api(analyticsApiQuery(id), { method: "DELETE" });
+          analyticsRowsState = analyticsRowsState.filter((r) => r.id !== id);
+          if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
+          updateAnalyticsTableDom(host);
+          toast("Deleted");
+        } catch (e) {
+          toast("Error: " + (e?.message || String(e)));
+          btn.disabled = false;
         }
       });
     });
@@ -1705,7 +1665,7 @@
           </div>
           <div class="analyticsTableViewport">${renderAnalyticsRows(analyticsRowsState)}</div>
         </div>
-        <p class="analyticsPageSub" style="margin-top:10px;">Today = today 05:00 JST → tomorrow 05:00 JST.</p>
+        <p class="analyticsPageSub" style="margin-top:10px;">Before 05:00 JST, Today = previous day (yesterday 05:00 → today 05:00). After 05:00 JST, Today = current day (today 05:00 → tomorrow 05:00).</p>
       `;
       host.querySelectorAll("[data-analytics-period]").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -1714,6 +1674,7 @@
         });
       });
       bindAnalyticsFlagCheckboxes(host);
+      bindAnalyticsDeleteButtons(host);
     } catch (e) {
       host.textContent = "Error: " + (e?.message || String(e));
     }
@@ -1783,7 +1744,7 @@
             </table>
           </div>
         </div>
-        <p class="analyticsPageSub" style="margin-top:10px;">Today = today 05:00 JST → tomorrow 05:00 JST.</p>
+        <p class="analyticsPageSub" style="margin-top:10px;">Before 05:00 JST, Today = previous day (yesterday 05:00 → today 05:00). After 05:00 JST, Today = current day (today 05:00 → tomorrow 05:00).</p>
       `;
       host.querySelectorAll("[data-admin-analytics-period]").forEach((btn) => {
         btn.addEventListener("click", () => {

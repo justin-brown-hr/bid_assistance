@@ -12,6 +12,7 @@ import type {
   ClientProfileFilters,
 } from "./types.js";
 import { normalizeAnalyticsPeriod, periodRange, type AnalyticsPeriod } from "./analytics/japanDay.js";
+import { analyticsProjectDetailUrl, formatAnalyticsWhen } from "./analytics/display.js";
 import { hashApiKey, maskApiKey, type OpenRouterKeyStore } from "./ai/openrouter.js";
 import { BID_MODEL_SEED, OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
 
@@ -1270,6 +1271,10 @@ export class DashboardDbSqlite {
     const projectId = String(data.projectId ?? "").trim();
     if (!user || !projectId) throw new Error("Invalid bid analytics payload");
     const now = Date.now();
+    const storedUrl = analyticsProjectDetailUrl({
+      projectId,
+      projectUrl: data.projectUrl ?? null,
+    }) || (data.projectUrl?.trim() || null);
     this.db.prepare(`
       INSERT INTO bid_analytics (
         username, project_id, project_title, project_url, action,
@@ -1285,7 +1290,7 @@ export class DashboardDbSqlite {
       user,
       projectId,
       data.projectTitle ?? null,
-      data.projectUrl ?? null,
+      storedUrl,
       data.action,
       now,
       now,
@@ -1320,7 +1325,7 @@ export class DashboardDbSqlite {
     created_at: number;
     updated_at: number;
   }): BidAnalyticsRow {
-    return {
+    const row: BidAnalyticsRow = {
       id: r.id,
       projectId: r.project_id,
       projectTitle: r.project_title,
@@ -1331,6 +1336,18 @@ export class DashboardDbSqlite {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
+    row.whenLabel = formatAnalyticsWhen(row.createdAt);
+    row.detailUrl = analyticsProjectDetailUrl(row);
+    return row;
+  }
+
+  deleteBidAnalytics(username: string, id: number): void {
+    if (!this.db) throw new Error("DB not connected");
+    const user = username.trim().toLowerCase();
+    const result = this.db.prepare(
+      "DELETE FROM bid_analytics WHERE id = ? AND username = ?",
+    ).run(id, user);
+    if (result.changes === 0) throw new Error("Analytics row not found");
   }
 
   listBidAnalytics(username: string, period: AnalyticsPeriod): BidAnalyticsRow[] {

@@ -101,6 +101,8 @@ export type BidAnalyticsRow = {
   isAward: boolean;
   createdAt: number;
   updatedAt: number;
+  whenLabel?: string;
+  detailUrl?: string;
 };
 
 export type BidAnalyticsSummary = {
