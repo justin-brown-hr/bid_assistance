@@ -124,12 +124,12 @@
   function refreshListIfOnApp() {
     const listEl = document.getElementById("list");
     if (!listEl || route() !== "/app") return;
-    const items = Array.from(state.values()).sort((a, b) => (b.foundAt || 0) - (a.foundAt || 0));
+    const items = visibleProjectItems();
     const max = 50;
-    listEl.innerHTML = items
-      .slice(0, max)
-      .map((it) => renderListRow(it, it.id === selectedProjectId))
-      .join("");
+    const sliced = items.slice(0, max);
+    listEl.innerHTML = sliced.length
+      ? sliced.map((it) => renderListRow(it, it.id === selectedProjectId)).join("")
+      : `<div class="navTableEmpty">No new projects — copied ones are hidden.</div>`;
   }
 
   function playNewProjectBeep() {

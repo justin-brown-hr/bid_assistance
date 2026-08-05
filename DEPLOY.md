@@ -45,11 +45,18 @@ cp -n .env.example .env   # first time only
 nano .env                 # set secrets; DASHBOARD_PORT=3030
 
 npm install
-npm run build
+**npm run build**   ← required every update (`dist/` is gitignored)
 
 pm2 start ecosystem.config.cjs
 # or after updates:
 pm2 restart freelancer-helper
+
+Or run the helper script:
+
+```bash
+chmod +x scripts/vps-update.sh
+./scripts/vps-update.sh
+```
 pm2 save
 pm2 startup   # once, follow printed command
 ```
@@ -112,6 +119,22 @@ Logged-in users on the Projects page get:
 when a new project arrives over SSE.
 
 ## 9. Troubleshooting
+
+**Analytics tab missing / Projects page broken after `git pull`**
+
+`dist/` is **not** in git. PM2 runs `dist/index.js`, and the HTML shell (nav links, CSS) comes from compiled `dist/dashboardServer.js`.  
+`app.js` is read from `src/` at runtime, so a pull can leave **new frontend + old backend** until you build.
+
+On the VPS:
+
+```bash
+cd /home/user/work/bid_assistance
+npm run build
+pm2 restart freelancer-helper
+curl -sS http://127.0.0.1:3030/ | grep headerAnalyticsLink
+```
+
+The last command should print `headerAnalyticsLink`. If it does not, the build did not update `dist/`.
 
 ```bash
 pm2 status
