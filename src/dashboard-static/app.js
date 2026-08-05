@@ -29,6 +29,8 @@
   let adminAnalyticsSort = "username";
   let adminAnalyticsOrder = "asc";
   let analyticsRowsState = [];
+  let analyticsPage = 1;
+  let analyticsPageSize = 20;
   let eventSource = null;
   let feedReady = false;
   function toast(msg) {
@@ -306,6 +308,14 @@
 
   function fmtAnalyticsPct(n) {
     return `${Number(n || 0).toFixed(1)}%`;
+  }
+
+  function analyticsPctGoodClass(pct) {
+    return Number(pct || 0) > 5 ? " analyticsPctGood" : "";
+  }
+
+  function fmtAnalyticsPctSpan(pct) {
+    return `<span class="analyticsPct${analyticsPctGoodClass(pct)}">${esc(fmtAnalyticsPct(pct))}</span>`;
   }
 
   function analyticsApiQuery(id) {
@@ -1529,6 +1539,8 @@
 
   function renderAnalyticsSummaryCards(summary) {
     const s = summary || {};
+    const chatPct = Number(s.chatPct ?? 0);
+    const awardPct = Number(s.awardPct ?? 0);
     return `
       <div class="analyticsSummaryGrid">
         <div class="analyticsSummaryCard">
@@ -1538,15 +1550,78 @@
         <div class="analyticsSummaryCard">
           <div class="analyticsSummaryLabel">Chat</div>
           <div class="analyticsSummaryValue">${esc(String(s.chatCount ?? 0))}</div>
-          <div class="analyticsSummarySub">${fmtAnalyticsPct(s.chatPct)}</div>
+          <div class="analyticsSummarySub${analyticsPctGoodClass(chatPct)}">${esc(fmtAnalyticsPct(chatPct))}</div>
         </div>
         <div class="analyticsSummaryCard">
           <div class="analyticsSummaryLabel">Award</div>
           <div class="analyticsSummaryValue">${esc(String(s.awardCount ?? 0))}</div>
-          <div class="analyticsSummarySub">${fmtAnalyticsPct(s.awardPct)}</div>
+          <div class="analyticsSummarySub${analyticsPctGoodClass(awardPct)}">${esc(fmtAnalyticsPct(awardPct))}</div>
         </div>
       </div>
     `;
+  }
+
+  function analyticsTotalPages() {
+    return Math.max(1, Math.ceil(analyticsRowsState.length / analyticsPageSize));
+  }
+
+  function analyticsPageRows() {
+    const total = analyticsTotalPages();
+    if (analyticsPage > total) analyticsPage = total;
+    if (analyticsPage < 1) analyticsPage = 1;
+    const start = (analyticsPage - 1) * analyticsPageSize;
+    return analyticsRowsState.slice(start, start + analyticsPageSize);
+  }
+
+  function renderAnalyticsPagerHtml() {
+    const total = analyticsRowsState.length;
+    const totalPages = analyticsTotalPages();
+    if (total <= 0) return "";
+    const pageSizeOptions = [10, 20, 50, 100].map(
+      (n) => `<option value="${n}"${n === analyticsPageSize ? " selected" : ""}>${n}</option>`,
+    ).join("");
+    return `
+      <div class="pagination analyticsPager">
+        <button class="btn" type="button" id="analyticsPrev" ${analyticsPage <= 1 ? "disabled" : ""}>Previous</button>
+        <span class="paginationInfo">Page ${analyticsPage} of ${totalPages} · ${total} project(s)</span>
+        <button class="btn" type="button" id="analyticsNext" ${analyticsPage >= totalPages ? "disabled" : ""}>Next</button>
+        <div class="paginationControls">
+          <label>Per page
+            <select id="analyticsPageSize">${pageSizeOptions}</select>
+          </label>
+          <label>Go to
+            <input type="number" id="analyticsGoPage" min="1" max="${totalPages}" value="${analyticsPage}" />
+          </label>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindAnalyticsPager(host) {
+    host.querySelector("#analyticsPrev")?.addEventListener("click", () => {
+      if (analyticsPage > 1) {
+        analyticsPage -= 1;
+        updateAnalyticsTableDom(host);
+      }
+    });
+    host.querySelector("#analyticsNext")?.addEventListener("click", () => {
+      if (analyticsPage < analyticsTotalPages()) {
+        analyticsPage += 1;
+        updateAnalyticsTableDom(host);
+      }
+    });
+    host.querySelector("#analyticsPageSize")?.addEventListener("change", (e) => {
+      analyticsPageSize = Number(e.target.value) || 20;
+      analyticsPage = 1;
+      updateAnalyticsTableDom(host);
+    });
+    host.querySelector("#analyticsGoPage")?.addEventListener("change", (e) => {
+      const n = Number(e.target.value);
+      if (Number.isFinite(n) && n >= 1 && n <= analyticsTotalPages()) {
+        analyticsPage = n;
+        updateAnalyticsTableDom(host);
+      }
+    });
   }
 
   function updateAnalyticsSummaryDom(host, summary) {
@@ -1555,10 +1630,11 @@
     grid.outerHTML = renderAnalyticsSummaryCards(summary);
   }
 
-  function renderAnalyticsRows(rows) {
+  function renderAnalyticsRows(rows, rowOffset) {
     if (!rows?.length) {
       return `<div class="navTableEmpty">No copied bids in this period.</div>`;
     }
+    const offset = rowOffset || 0;
     return `
       <table class="navTable">
         <thead>
@@ -1578,7 +1654,7 @@
             const when = esc(r.whenLabel || "—");
             return `
               <tr class="navTableRow" data-analytics-row="${r.id}">
-                <td class="navTableCell navColNum muted">${i + 1}</td>
+                <td class="navTableCell navColNum muted">${offset + i + 1}</td>
                 <td class="navTableCell navColWrap">
                   ${url ? `<a href="${url}" target="_blank" rel="noopener">${title}</a>` : title}
                 </td>
@@ -1605,8 +1681,18 @@
   function updateAnalyticsTableDom(host) {
     const viewport = host?.querySelector(".analyticsTableViewport");
     const countEl = host?.querySelector(".navTableCount");
-    if (viewport) viewport.innerHTML = renderAnalyticsRows(analyticsRowsState);
-    if (countEl) countEl.textContent = `${analyticsRowsState.length} project(s)`;
+    const pagerHost = host?.querySelector("#analyticsPager");
+    const total = analyticsRowsState.length;
+    const totalPages = analyticsTotalPages();
+    if (analyticsPage > totalPages) analyticsPage = totalPages;
+    const start = (analyticsPage - 1) * analyticsPageSize;
+    const pageRows = analyticsPageRows();
+    if (viewport) viewport.innerHTML = renderAnalyticsRows(pageRows, start);
+    if (countEl) countEl.textContent = `${total} project(s)`;
+    if (pagerHost) {
+      pagerHost.innerHTML = renderAnalyticsPagerHtml();
+      bindAnalyticsPager(host);
+    }
   }
 
   async function handleAnalyticsDelete(host, id, btn) {
@@ -1615,6 +1701,7 @@
     try {
       const j = await api(analyticsDeleteUrl(id), { method: "POST" });
       analyticsRowsState = analyticsRowsState.filter((r) => r.id !== id);
+      if (analyticsPage > analyticsTotalPages()) analyticsPage = analyticsTotalPages();
       if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
       updateAnalyticsTableDom(host);
       toast("Deleted");
@@ -1669,6 +1756,7 @@
     try {
       const j = await api("/api/analytics?period=" + encodeURIComponent(analyticsPeriod));
       analyticsRowsState = j.rows || [];
+      analyticsPage = 1;
       host.innerHTML = `
         <div class="analyticsPeriodRow">${renderAnalyticsPeriodButtons(analyticsPeriod, "analytics")}</div>
         ${renderAnalyticsSummaryCards(j.summary)}
@@ -1679,16 +1767,19 @@
               <span class="navTableCount">${analyticsRowsState.length} project(s)</span>
             </div>
           </div>
-          <div class="analyticsTableViewport">${renderAnalyticsRows(analyticsRowsState)}</div>
+          <div class="analyticsTableViewport">${renderAnalyticsRows(analyticsPageRows(), (analyticsPage - 1) * analyticsPageSize)}</div>
         </div>
+        <div id="analyticsPager">${renderAnalyticsPagerHtml()}</div>
         <p class="analyticsPageSub" style="margin-top:10px;">Before 05:00 JST, Today = previous day (yesterday 05:00 → today 05:00). After 05:00 JST, Today = current day (today 05:00 → tomorrow 05:00).</p>
       `;
       host.querySelectorAll("[data-analytics-period]").forEach((btn) => {
         btn.addEventListener("click", () => {
           analyticsPeriod = btn.getAttribute("data-analytics-period") || "today";
+          analyticsPage = 1;
           void loadAnalyticsContent(host);
         });
       });
+      bindAnalyticsPager(host);
       ensureAnalyticsActions(host);
     } catch (e) {
       host.textContent = "Error: " + (e?.message || String(e));
@@ -1751,8 +1842,8 @@
                   <tr class="navTableRow">
                     <td class="navTableCell"><code>${esc(r.username)}</code></td>
                     <td class="navTableCell navColCenter">${esc(String(r.bidCount ?? 0))}</td>
-                    <td class="navTableCell navColCenter">${fmtAnalyticsPct(r.chatPct)} <span class="muted">(${esc(String(r.chatCount ?? 0))})</span></td>
-                    <td class="navTableCell navColCenter">${fmtAnalyticsPct(r.awardPct)} <span class="muted">(${esc(String(r.awardCount ?? 0))})</span></td>
+                    <td class="navTableCell navColCenter">${fmtAnalyticsPctSpan(r.chatPct)} <span class="muted">(${esc(String(r.chatCount ?? 0))})</span></td>
+                    <td class="navTableCell navColCenter">${fmtAnalyticsPctSpan(r.awardPct)} <span class="muted">(${esc(String(r.awardCount ?? 0))})</span></td>
                   </tr>
                 `).join("")}
               </tbody>

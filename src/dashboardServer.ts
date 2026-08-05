@@ -2413,6 +2413,11 @@ export class DashboardServer {
       .analyticsSummaryLabel { font-size: 12px; color: var(--muted); font-weight: 600; }
       .analyticsSummaryValue { margin-top: 4px; font-size: 22px; font-weight: 700; color: var(--text); }
       .analyticsSummarySub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+      .analyticsSummarySub.analyticsPctGood,
+      .analyticsPct.analyticsPctGood { color: #16a34a; font-weight: 600; }
+      :root[data-theme="dark"] .analyticsSummarySub.analyticsPctGood,
+      :root[data-theme="dark"] .analyticsPct.analyticsPctGood { color: #4ade80; }
+      .analyticsPager { margin-top: 10px; flex-shrink: 0; }
       .analyticsTableShell {
         flex: 1;
         min-height: 0;
