@@ -1,11 +1,9 @@
-import { jstAnalyticsDate } from "./japanDay.js";
-
 function normalizeJstHour(hour: number): number {
   if (hour === 24) return 0;
   return hour;
 }
 
-/** Display label for analytics When column (JST, 05:00 day boundary). */
+/** When column: actual copy time in Japan (wall-clock JST). */
 export function formatAnalyticsWhen(ms: number): string {
   if (!ms) return "—";
   try {
@@ -19,20 +17,16 @@ export function formatAnalyticsWhen(ms: number): string {
       hour12: false,
     }).formatToParts(new Date(ms));
     const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
-    let year = Number(get("year"));
-    let month = Number(get("month"));
-    let day = Number(get("day"));
-    const hour = normalizeJstHour(Number(get("hour")));
+    const year = get("year");
+    const month = Number(get("month"));
+    const day = Number(get("day"));
+    const hour = String(normalizeJstHour(Number(get("hour")))).padStart(2, "0");
     const minute = get("minute");
-    const analytics = jstAnalyticsDate(ms);
-    year = analytics.year;
-    month = analytics.month;
-    day = analytics.day;
-    const monthLabel = new Date(Date.UTC(year, month - 1, day)).toLocaleString("en-US", {
+    const monthLabel = new Date(Date.UTC(Number(year), month - 1, day)).toLocaleString("en-US", {
       month: "short",
       timeZone: "UTC",
     });
-    return `${monthLabel} ${day}, ${year} ${String(hour).padStart(2, "0")}:${minute}`;
+    return `${monthLabel} ${day}, ${year} ${hour}:${minute} JST`;
   } catch {
     return "—";
   }

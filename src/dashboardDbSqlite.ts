@@ -11,7 +11,7 @@ import type {
   ClientProfile,
   ClientProfileFilters,
 } from "./types.js";
-import { normalizeAnalyticsPeriod, periodRange, type AnalyticsPeriod } from "./analytics/japanDay.js";
+import { analyticsDayKey, analyticsNowMs, analyticsPeriodClause, normalizeAnalyticsPeriod, type AnalyticsPeriod } from "./analytics/japanDay.js";
 import { analyticsProjectDetailUrl, formatAnalyticsWhen } from "./analytics/display.js";
 import { hashApiKey, maskApiKey, type OpenRouterKeyStore } from "./ai/openrouter.js";
 import { BID_MODEL_SEED, OPENROUTER_DEFAULT_MODEL } from "./ai/bidModels.js";
@@ -201,7 +201,37 @@ export class DashboardDbSqlite {
     } catch {
       // column already exists
     }
+    try {
+      this.db.exec(`ALTER TABLE bid_analytics ADD COLUMN analytics_day TEXT`);
+    } catch {
+      // column already exists
+    }
+    try {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_bid_analytics_user_day
+          ON bid_analytics(username, analytics_day DESC)
+      `);
+    } catch {
+      // index already exists
+    }
+    this.backfillBidAnalyticsDays();
     this.seedBidModels();
+  }
+
+  private backfillBidAnalyticsDays(): void {
+    if (!this.db) return;
+    const rows = this.db.prepare(`
+      SELECT id, created_at FROM bid_analytics
+      WHERE analytics_day IS NULL OR analytics_day = ''
+    `).all() as Array<{ id: number; created_at: number }>;
+    if (!rows.length) return;
+    const stmt = this.db.prepare(`UPDATE bid_analytics SET analytics_day = ? WHERE id = ?`);
+    const tx = this.db.transaction((items: Array<{ id: number; created_at: number }>) => {
+      for (const r of items) {
+        stmt.run(analyticsDayKey(r.created_at), r.id);
+      }
+    });
+    tx(rows);
   }
 
   private seedBidModels(): void {
@@ -1248,13 +1278,8 @@ export class DashboardDbSqlite {
     return deleted;
   }
 
-  private bidAnalyticsPeriodClause(period: AnalyticsPeriod): { sql: string; params: number[] } {
-    const range = periodRange(period);
-    if (!range) return { sql: "", params: [] };
-    return {
-      sql: " AND created_at >= ? AND created_at < ?",
-      params: [range.from, range.to],
-    };
+  private bidAnalyticsPeriodClause(period: AnalyticsPeriod): { sql: string; params: string[] } {
+    return analyticsPeriodClause(period, "analytics_day", analyticsNowMs());
   }
 
   recordBidAnalytics(
@@ -1270,7 +1295,8 @@ export class DashboardDbSqlite {
     const user = username.trim().toLowerCase();
     const projectId = String(data.projectId ?? "").trim();
     if (!user || !projectId) throw new Error("Invalid bid analytics payload");
-    const now = Date.now();
+    const now = analyticsNowMs();
+    const dayKey = analyticsDayKey(now);
     const storedUrl = analyticsProjectDetailUrl({
       projectId,
       projectUrl: data.projectUrl ?? null,
@@ -1278,14 +1304,15 @@ export class DashboardDbSqlite {
     this.db.prepare(`
       INSERT INTO bid_analytics (
         username, project_id, project_title, project_url, action,
-        is_chat, is_award, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+        is_chat, is_award, created_at, updated_at, analytics_day
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
       ON CONFLICT(username, project_id) DO UPDATE SET
         project_title = excluded.project_title,
         project_url = excluded.project_url,
         action = excluded.action,
         created_at = excluded.created_at,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        analytics_day = excluded.analytics_day
     `).run(
       user,
       projectId,
@@ -1294,10 +1321,11 @@ export class DashboardDbSqlite {
       data.action,
       now,
       now,
+      dayKey,
     );
     const row = this.db.prepare(`
       SELECT id, username, project_id, project_title, project_url, action,
-             is_chat, is_award, created_at, updated_at
+             is_chat, is_award, created_at, updated_at, analytics_day
       FROM bid_analytics WHERE username = ? AND project_id = ?
     `).get(user, projectId) as {
       id: number;
@@ -1310,6 +1338,7 @@ export class DashboardDbSqlite {
       is_award: number;
       created_at: number;
       updated_at: number;
+      analytics_day: string | null;
     };
     return this.mapBidAnalyticsRow(row);
   }
@@ -1324,6 +1353,7 @@ export class DashboardDbSqlite {
     is_award: number;
     created_at: number;
     updated_at: number;
+    analytics_day?: string | null;
   }): BidAnalyticsRow {
     const row: BidAnalyticsRow = {
       id: r.id,
@@ -1335,6 +1365,7 @@ export class DashboardDbSqlite {
       isAward: r.is_award === 1,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      analyticsDay: r.analytics_day ?? analyticsDayKey(r.created_at),
     };
     row.whenLabel = formatAnalyticsWhen(row.createdAt);
     row.detailUrl = analyticsProjectDetailUrl(row);
@@ -1356,7 +1387,7 @@ export class DashboardDbSqlite {
     const { sql, params } = this.bidAnalyticsPeriodClause(period);
     const rows = this.db.prepare(`
       SELECT id, project_id, project_title, project_url, action,
-             is_chat, is_award, created_at, updated_at
+             is_chat, is_award, created_at, updated_at, analytics_day
       FROM bid_analytics
       WHERE username = ?${sql}
       ORDER BY created_at DESC
@@ -1370,6 +1401,7 @@ export class DashboardDbSqlite {
       is_award: number;
       created_at: number;
       updated_at: number;
+      analytics_day: string | null;
     }>;
     return rows.map((r) => this.mapBidAnalyticsRow(r));
   }
@@ -1416,7 +1448,7 @@ export class DashboardDbSqlite {
     const user = username.trim().toLowerCase();
     const existing = this.db.prepare(`
       SELECT id, project_id, project_title, project_url, action,
-             is_chat, is_award, created_at, updated_at
+             is_chat, is_award, created_at, updated_at, analytics_day
       FROM bid_analytics WHERE id = ? AND username = ?
     `).get(id, user) as {
       id: number;
@@ -1428,11 +1460,12 @@ export class DashboardDbSqlite {
       is_award: number;
       created_at: number;
       updated_at: number;
+      analytics_day: string | null;
     } | undefined;
     if (!existing) throw new Error("Analytics row not found");
     const isChat = flags.isChat !== undefined ? (flags.isChat ? 1 : 0) : existing.is_chat;
     const isAward = flags.isAward !== undefined ? (flags.isAward ? 1 : 0) : existing.is_award;
-    const now = Date.now();
+    const now = analyticsNowMs();
     this.db.prepare(`
       UPDATE bid_analytics SET is_chat = ?, is_award = ?, updated_at = ? WHERE id = ? AND username = ?
     `).run(isChat, isAward, now, id, user);
@@ -1450,9 +1483,7 @@ export class DashboardDbSqlite {
     order: "asc" | "desc",
   ): AdminUserAnalyticsRow[] {
     if (!this.db) throw new Error("DB not connected");
-    const range = periodRange(period);
-    const periodSql = range ? " AND b.created_at >= ? AND b.created_at < ?" : "";
-    const periodParams = range ? [range.from, range.to] : [];
+    const { sql, params } = analyticsPeriodClause(period, "b.analytics_day", analyticsNowMs());
     const rows = this.db.prepare(`
       SELECT
         u.username,
@@ -1460,9 +1491,9 @@ export class DashboardDbSqlite {
         SUM(CASE WHEN b.is_chat = 1 THEN 1 ELSE 0 END) AS chat_count,
         SUM(CASE WHEN b.is_award = 1 THEN 1 ELSE 0 END) AS award_count
       FROM users u
-      LEFT JOIN bid_analytics b ON b.username = u.username${periodSql}
+      LEFT JOIN bid_analytics b ON b.username = u.username${sql}
       GROUP BY u.username
-    `).all(...periodParams) as Array<{
+    `).all(...params) as Array<{
       username: string;
       bid_count: number;
       chat_count: number;

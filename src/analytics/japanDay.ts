@@ -18,7 +18,11 @@ function normalizeJstHour(hour: number): number {
   return hour;
 }
 
-/** Wall-clock calendar date/time in JST. */
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** Wall-clock calendar date/time in JST (server-side, independent of VPS locale). */
 function jstParts(ms: number): JstParts {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: TZ,
@@ -48,6 +52,33 @@ export function jstAnalyticsDate(ms: number): JstParts {
   return p;
 }
 
+/** YYYY-MM-DD analytics day key in Japan (05:00 boundary). */
+export function analyticsDayKey(ms: number): string {
+  const d = jstAnalyticsDate(ms);
+  return `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
+}
+
+export function addAnalyticsDayKey(key: string, delta: number): string {
+  const [y, m, d] = key.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+}
+
+function analyticsWeekStartKey(ms: number): string {
+  const d = jstAnalyticsDate(ms);
+  const dt = new Date(Date.UTC(d.year, d.month - 1, d.day));
+  const dow = dt.getUTCDay();
+  const daysFromMon = (dow + 6) % 7;
+  dt.setUTCDate(dt.getUTCDate() - daysFromMon);
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth() + 1)}-${pad2(dt.getUTCDate())}`;
+}
+
+/** Current instant — all analytics grouping uses JST derived from this UTC ms. */
+export function analyticsNowMs(): number {
+  return Date.now();
+}
+
 /** UTC ms for 05:00 JST on the given calendar Y-M-D. */
 export function jstDayStartMs(year: number, month: number, day: number): number {
   return Date.UTC(year, month - 1, day, DAY_START_HOUR, 0, 0) - JST_OFFSET_MS;
@@ -70,23 +101,57 @@ function addCalendarDays(year: number, month: number, day: number, delta: number
   };
 }
 
-/** Monday 05:00 JST for the analytics week that contains `ms`. */
 function analyticsWeekMondayStartMs(ms: number): number {
   const d = jstAnalyticsDate(ms);
-  const dt = new Date(Date.UTC(d.year, d.month - 1, d.day));
-  const dow = dt.getUTCDay(); // 0 Sun .. 6 Sat
+  const dow = new Date(Date.UTC(d.year, d.month - 1, d.day)).getUTCDay();
   const daysFromMon = (dow + 6) % 7;
   const mon = addCalendarDays(d.year, d.month, d.day, -daysFromMon);
   return jstDayStartMs(mon.year, mon.month, mon.day);
 }
 
+/** SQL filter on analytics_day column (JST 05:00 groups). */
+export function analyticsPeriodClause(
+  period: AnalyticsPeriod,
+  column = "analytics_day",
+  nowMs = analyticsNowMs(),
+): { sql: string; params: string[] } {
+  if (period === "all") return { sql: "", params: [] };
+
+  const todayKey = analyticsDayKey(nowMs);
+
+  if (period === "today") {
+    return { sql: ` AND ${column} = ?`, params: [todayKey] };
+  }
+  if (period === "yesterday") {
+    return { sql: ` AND ${column} = ?`, params: [addAnalyticsDayKey(todayKey, -1)] };
+  }
+  if (period === "this_week") {
+    const from = analyticsWeekStartKey(nowMs);
+    const to = addAnalyticsDayKey(from, 6);
+    return { sql: ` AND ${column} >= ? AND ${column} <= ?`, params: [from, to] };
+  }
+  if (period === "last_week") {
+    const thisFrom = analyticsWeekStartKey(nowMs);
+    const from = addAnalyticsDayKey(thisFrom, -7);
+    const to = addAnalyticsDayKey(thisFrom, -1);
+    return { sql: ` AND ${column} >= ? AND ${column} <= ?`, params: [from, to] };
+  }
+  if (period === "this_month") {
+    const d = jstAnalyticsDate(nowMs);
+    const from = `${d.year}-${pad2(d.month)}-01`;
+    const next = d.month === 12
+      ? `${d.year + 1}-01-01`
+      : `${d.year}-${pad2(d.month + 1)}-01`;
+    return { sql: ` AND ${column} >= ? AND ${column} < ?`, params: [from, next] };
+  }
+  return { sql: "", params: [] };
+}
+
 /**
- * Period ranges (all 05:00 JST boundaries, using analytics calendar date):
- *
- * Before 05:00 JST on 8/6 → "today" is 8/5 (window: 8/5 05:00 → 8/6 05:00).
- * After 05:00 JST on 8/6 → "today" is 8/6 (window: 8/6 05:00 → 8/7 05:00).
+ * Timestamp range for period (05:00 JST boundaries).
+ * At JST 8/6 00:37 → today window is 8/5 05:00 → 8/6 05:00.
  */
-export function periodRange(period: AnalyticsPeriod, nowMs = Date.now()): { from: number; to: number } | null {
+export function periodRange(period: AnalyticsPeriod, nowMs = analyticsNowMs()): { from: number; to: number } | null {
   if (period === "all") return null;
   const dayStart = analyticsDayStartMs(nowMs);
   if (period === "today") {

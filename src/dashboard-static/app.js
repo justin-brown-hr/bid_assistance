@@ -313,6 +313,17 @@
       + "?period=" + encodeURIComponent(analyticsPeriod);
   }
 
+  function analyticsDeleteUrl(id) {
+    return "/api/analytics/" + encodeURIComponent(String(id)) + "/delete"
+      + "?period=" + encodeURIComponent(analyticsPeriod);
+  }
+
+  function deleteIconSvg() {
+    return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M10 11v6M14 11v6M6 7l1 12a1 1 0 001 1h8a1 1 0 001-1l1-12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
+  }
+
   function esc(s) {
     return String(s)
       .replaceAll("&", "&amp;")
@@ -1557,7 +1568,7 @@
             <th class="navTableHead navColCenter">Chat</th>
             <th class="navTableHead navColCenter">Award</th>
             <th class="navTableHead navColDate">When</th>
-            <th class="navTableHead navColAction">Delete</th>
+            <th class="navTableHead navColIcon"></th>
           </tr>
         </thead>
         <tbody>
@@ -1578,8 +1589,10 @@
                   <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="award"${r.isAward ? " checked" : ""} />
                 </td>
                 <td class="navTableCell navColDate muted">${when}</td>
-                <td class="navTableCell navColAction">
-                  <button type="button" class="navRowBtn navRowBtnDanger analyticsDeleteBtn" data-analytics-id="${r.id}">Delete</button>
+                <td class="navTableCell navColIcon">
+                  <button type="button" class="iconBtn iconBtnDanger analyticsDeleteBtn" data-analytics-id="${r.id}" title="Delete" aria-label="Delete">
+                    ${deleteIconSvg()}
+                  </button>
                 </td>
               </tr>
             `;
@@ -1594,56 +1607,59 @@
     const countEl = host?.querySelector(".navTableCount");
     if (viewport) viewport.innerHTML = renderAnalyticsRows(analyticsRowsState);
     if (countEl) countEl.textContent = `${analyticsRowsState.length} project(s)`;
-    bindAnalyticsFlagCheckboxes(host);
-    bindAnalyticsDeleteButtons(host);
   }
 
-  function bindAnalyticsFlagCheckboxes(host) {
-    host?.querySelectorAll(".analyticsFlagCb").forEach((cb) => {
-      cb.addEventListener("change", async () => {
-        const id = Number(cb.getAttribute("data-analytics-id"));
-        const flag = cb.getAttribute("data-flag");
-        if (!Number.isFinite(id) || !flag) return;
-        const body = flag === "chat" ? { isChat: cb.checked } : { isAward: cb.checked };
-        cb.disabled = true;
-        try {
-          const j = await api(analyticsApiQuery(id), {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(body),
-          });
-          const row = j.row;
-          const idx = analyticsRowsState.findIndex((r) => r.id === id);
-          if (idx >= 0 && row) analyticsRowsState[idx] = row;
-          if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
-        } catch (e) {
-          cb.checked = !cb.checked;
-          toast("Error: " + (e?.message || String(e)));
-        } finally {
-          cb.disabled = false;
-        }
-      });
+  async function handleAnalyticsDelete(host, id, btn) {
+    if (!(await appConfirm("Delete this analytics row?", { title: "Delete bid", confirmText: "Delete", danger: true }))) return;
+    if (btn) btn.disabled = true;
+    try {
+      const j = await api(analyticsDeleteUrl(id), { method: "POST" });
+      analyticsRowsState = analyticsRowsState.filter((r) => r.id !== id);
+      if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
+      updateAnalyticsTableDom(host);
+      toast("Deleted");
+    } catch (e) {
+      toast("Error: " + (e?.message || String(e)));
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function ensureAnalyticsActions(host) {
+    if (!host || host.dataset.analyticsActionsBound === "1") return;
+    host.dataset.analyticsActionsBound = "1";
+    host.addEventListener("change", async (e) => {
+      const cb = e.target?.closest?.(".analyticsFlagCb");
+      if (!cb) return;
+      const id = Number(cb.getAttribute("data-analytics-id"));
+      const flag = cb.getAttribute("data-flag");
+      if (!Number.isFinite(id) || !flag) return;
+      const body = flag === "chat" ? { isChat: cb.checked } : { isAward: cb.checked };
+      cb.disabled = true;
+      try {
+        const j = await api(analyticsApiQuery(id), {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const row = j.row;
+        const idx = analyticsRowsState.findIndex((r) => r.id === id);
+        if (idx >= 0 && row) analyticsRowsState[idx] = row;
+        if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
+      } catch (err) {
+        cb.checked = !cb.checked;
+        toast("Error: " + (err?.message || String(err)));
+      } finally {
+        cb.disabled = false;
+      }
     });
-  }
-
-  function bindAnalyticsDeleteButtons(host) {
-    host?.querySelectorAll(".analyticsDeleteBtn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = Number(btn.getAttribute("data-analytics-id"));
-        if (!Number.isFinite(id)) return;
-        if (!(await appConfirm("Delete this analytics row?", { title: "Delete bid", confirmText: "Delete", danger: true }))) return;
-        btn.disabled = true;
-        try {
-          const j = await api(analyticsApiQuery(id), { method: "DELETE" });
-          analyticsRowsState = analyticsRowsState.filter((r) => r.id !== id);
-          if (j.summary) updateAnalyticsSummaryDom(host, j.summary);
-          updateAnalyticsTableDom(host);
-          toast("Deleted");
-        } catch (e) {
-          toast("Error: " + (e?.message || String(e)));
-          btn.disabled = false;
-        }
-      });
+    host.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.(".analyticsDeleteBtn");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const id = Number(btn.getAttribute("data-analytics-id"));
+      if (!Number.isFinite(id)) return;
+      void handleAnalyticsDelete(host, id, btn);
     });
   }
 
@@ -1673,8 +1689,7 @@
           void loadAnalyticsContent(host);
         });
       });
-      bindAnalyticsFlagCheckboxes(host);
-      bindAnalyticsDeleteButtons(host);
+      ensureAnalyticsActions(host);
     } catch (e) {
       host.textContent = "Error: " + (e?.message || String(e));
     }

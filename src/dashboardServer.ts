@@ -20,6 +20,16 @@ import {
   sendSlackProjectLink,
 } from "./notify/slack.js";
 
+function parseAnalyticsRowId(pathname: string): number | null {
+  if (!pathname.startsWith("/api/analytics/")) return null;
+  const suffix = pathname.slice("/api/analytics/".length).replace(/\/$/, "");
+  if (!suffix || suffix === "events" || suffix === "skipped-ids") return null;
+  const deleteMatch = suffix.match(/^(\d+)\/delete$/);
+  if (deleteMatch) return Number(deleteMatch[1]);
+  const id = Number(suffix.split("/")[0]);
+  return Number.isFinite(id) ? id : null;
+}
+
 // Static assets served from src/dashboard-static/
 function dashboardStaticPath(relPath: string): string {
   return path.join(process.cwd(), "src", "dashboard-static", relPath);
@@ -1493,41 +1503,43 @@ export class DashboardServer {
         return;
       }
 
-      if (url.pathname.startsWith("/api/analytics/") && (req.method === "PATCH" || req.method === "DELETE")) {
-        (async () => {
-          try {
-            if (!this.db) throw new Error("DB not ready");
-            const username = this.verifySession(req.headers.cookie);
-            if (!username) throw new Error("Not logged in");
-            const suffix = url.pathname.slice("/api/analytics/".length);
-            const id = Number(suffix);
-            if (!Number.isFinite(id)) throw new Error("Invalid analytics id");
-            const period = normalizeAnalyticsPeriod(url.searchParams.get("period"));
+      if (url.pathname.startsWith("/api/analytics/")) {
+        const analyticsId = parseAnalyticsRowId(url.pathname);
+        const isDelete = req.method === "DELETE"
+          || (req.method === "POST" && url.pathname.endsWith("/delete"));
+        if (analyticsId != null && (req.method === "PATCH" || isDelete)) {
+          (async () => {
+            try {
+              if (!this.db) throw new Error("DB not ready");
+              const username = this.verifySession(req.headers.cookie);
+              if (!username) throw new Error("Not logged in");
+              const period = normalizeAnalyticsPeriod(url.searchParams.get("period"));
 
-            if (req.method === "DELETE") {
-              this.db.deleteBidAnalytics(username, id);
+              if (isDelete) {
+                this.db.deleteBidAnalytics(username, analyticsId);
+                const summary = this.db.getBidAnalyticsSummary(username, period);
+                res.setHeader("content-type", "application/json; charset=utf-8");
+                res.end(JSON.stringify({ ok: true, summary }));
+                return;
+              }
+
+              const body = (await this.readJsonBody(req)) as { isChat?: boolean; isAward?: boolean };
+              const row = this.db.updateBidAnalyticsFlags(username, analyticsId, {
+                isChat: body.isChat,
+                isAward: body.isAward,
+              });
               const summary = this.db.getBidAnalyticsSummary(username, period);
               res.setHeader("content-type", "application/json; charset=utf-8");
-              res.end(JSON.stringify({ ok: true, summary }));
-              return;
+              res.end(JSON.stringify({ ok: true, row, summary }));
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              res.statusCode = msg === "Not logged in" ? 401 : 400;
+              res.setHeader("content-type", "application/json; charset=utf-8");
+              res.end(JSON.stringify({ ok: false, error: msg }));
             }
-
-            const body = (await this.readJsonBody(req)) as { isChat?: boolean; isAward?: boolean };
-            const row = this.db.updateBidAnalyticsFlags(username, id, {
-              isChat: body.isChat,
-              isAward: body.isAward,
-            });
-            const summary = this.db.getBidAnalyticsSummary(username, period);
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: true, row, summary }));
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            res.statusCode = msg === "Not logged in" ? 401 : 400;
-            res.setHeader("content-type", "application/json; charset=utf-8");
-            res.end(JSON.stringify({ ok: false, error: msg }));
-          }
-        })();
-        return;
+          })();
+          return;
+        }
       }
 
       if (url.pathname === "/api/admin/analytics" && req.method === "GET") {
@@ -2445,6 +2457,9 @@ export class DashboardServer {
       }
       .iconBtn:hover:not(:disabled) { background: var(--btnHover); color: var(--text); }
       .iconBtn:disabled { opacity: 0.45; cursor: not-allowed; }
+      .iconBtnDanger { color: #dc2626; }
+      .iconBtnDanger:hover:not(:disabled) { color: #b91c1c; background: rgba(220, 38, 38, 0.1); }
+      .navColIcon { width: 52px; text-align: center; }
       .bidOfferGrid {
         display: grid;
         grid-template-columns: 1fr 1fr;
