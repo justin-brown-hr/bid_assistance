@@ -309,6 +309,47 @@
     return `${Number(n || 0).toFixed(1)}%`;
   }
 
+  /** JST wall time + analytics calendar date (day rolls at 05:00 JST). */
+  function normalizeJstHour(hour) {
+    if (hour === 24) return 0;
+    return hour;
+  }
+
+  function fmtAnalyticsWhen(ms) {
+    if (!ms) return "—";
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Tokyo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).formatToParts(new Date(ms));
+      const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
+      let year = Number(get("year"));
+      let month = Number(get("month"));
+      let day = Number(get("day"));
+      const hour = normalizeJstHour(Number(get("hour")));
+      const minute = get("minute");
+      if (hour < 5) {
+        const d = new Date(Date.UTC(year, month - 1, day));
+        d.setUTCDate(d.getUTCDate() - 1);
+        year = d.getUTCFullYear();
+        month = d.getUTCMonth() + 1;
+        day = d.getUTCDate();
+      }
+      const monthLabel = new Date(Date.UTC(year, month - 1, day)).toLocaleString("en-US", {
+        month: "short",
+        timeZone: "UTC",
+      });
+      return `${monthLabel} ${day}, ${year} ${String(hour).padStart(2, "0")}:${minute}`;
+    } catch {
+      return "—";
+    }
+  }
+
   function analyticsProjectDetailUrl(row) {
     const rawUrl = String(row?.projectUrl || "").trim();
     if (rawUrl && !rawUrl.startsWith("manual:")) {
@@ -1591,7 +1632,7 @@
           ${rows.map((r, i) => {
             const title = esc(r.projectTitle || r.projectId || "—");
             const url = analyticsProjectDetailUrl(r);
-            const when = r.createdAt ? esc(fmtDateTime(r.createdAt)) : "—";
+            const when = r.createdAt ? esc(fmtAnalyticsWhen(r.createdAt)) : "—";
             return `
               <tr class="navTableRow">
                 <td class="navTableCell navColNum muted">${i + 1}</td>
@@ -1664,7 +1705,7 @@
           </div>
           <div class="analyticsTableViewport">${renderAnalyticsRows(analyticsRowsState)}</div>
         </div>
-        <p class="analyticsPageSub" style="margin-top:10px;">Day boundary: 05:00–05:00 Japan time.</p>
+        <p class="analyticsPageSub" style="margin-top:10px;">Today = today 05:00 JST → tomorrow 05:00 JST.</p>
       `;
       host.querySelectorAll("[data-analytics-period]").forEach((btn) => {
         btn.addEventListener("click", () => {
@@ -1742,7 +1783,7 @@
             </table>
           </div>
         </div>
-        <p class="analyticsPageSub" style="margin-top:10px;">Day boundary: 05:00–05:00 Japan time.</p>
+        <p class="analyticsPageSub" style="margin-top:10px;">Today = today 05:00 JST → tomorrow 05:00 JST.</p>
       `;
       host.querySelectorAll("[data-admin-analytics-period]").forEach((btn) => {
         btn.addEventListener("click", () => {
