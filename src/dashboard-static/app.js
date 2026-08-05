@@ -24,7 +24,6 @@
   const MATCH_PROJECT_LANG_KEY = "fh_matchProjectLanguage";
   let selectedProjectId = "";
   let activeBidProject = null;
-  const skippedProjectIds = new Set();
   let analyticsPeriod = "today";
   let adminAnalyticsPeriod = "today";
   let adminAnalyticsSort = "username";
@@ -124,12 +123,12 @@
   function refreshListIfOnApp() {
     const listEl = document.getElementById("list");
     if (!listEl || route() !== "/app") return;
-    const items = visibleProjectItems();
+    const items = sortedProjectItems();
     const max = 50;
     const sliced = items.slice(0, max);
     listEl.innerHTML = sliced.length
       ? sliced.map((it) => renderListRow(it, it.id === selectedProjectId)).join("")
-      : `<div class="navTableEmpty">No new projects — copied ones are hidden.</div>`;
+      : `<div class="navTableEmpty">No projects yet.</div>`;
   }
 
   function playNewProjectBeep() {
@@ -251,16 +250,11 @@
   async function bootstrapFeed() {
     stopEventStream();
     try {
-      const [itemsJ, skippedJ] = await Promise.all([
-        api("/api/items"),
-        api("/api/analytics/skipped-ids").catch(() => ({ projectIds: [] })),
-      ]);
+      const itemsJ = await api("/api/items");
       (itemsJ.items || []).forEach((it) => state.set(it.id, it));
-      skippedProjectIds.clear();
-      (skippedJ.projectIds || []).forEach((id) => skippedProjectIds.add(String(id)));
       refreshListIfOnApp();
       if (route() === "/app" && !selectedProjectId) {
-        const first = visibleProjectItems()[0];
+        const first = sortedProjectItems()[0];
         if (first?.id) selectedProjectId = first.id;
         refreshListIfOnApp();
       }
@@ -269,18 +263,14 @@
     startEventStream();
   }
 
-  function visibleProjectItems() {
-    return Array.from(state.values())
-      .filter((it) => {
-        const pid = it.project?.id;
-        return pid && !skippedProjectIds.has(String(pid));
-      })
-      .sort((a, b) => (b.foundAt || 0) - (a.foundAt || 0));
+  function sortedProjectItems() {
+    return Array.from(state.values()).sort((a, b) => (b.foundAt || 0) - (a.foundAt || 0));
   }
 
   async function recordBidAnalytics(action) {
     const p = activeBidProject;
     if (!p?.id) return;
+    const projectUrl = analyticsProjectDetailUrl({ projectId: p.id, projectUrl: p.url || "" }) || String(p.url || "").trim();
     try {
       const j = await api("/api/analytics/events", {
         method: "POST",
@@ -288,11 +278,10 @@
         body: JSON.stringify({
           projectId: String(p.id),
           projectTitle: p.title || "",
-          projectUrl: p.url || "",
+          projectUrl,
           action,
         }),
       });
-      skippedProjectIds.add(String(p.id));
       return j.row;
     } catch (e) {
       console.error("[analytics]", e);
@@ -317,6 +306,25 @@
 
   function fmtAnalyticsPct(n) {
     return `${Number(n || 0).toFixed(1)}%`;
+  }
+
+  function analyticsProjectDetailUrl(row) {
+    const rawUrl = String(row?.projectUrl || "").trim();
+    if (rawUrl && !rawUrl.startsWith("manual:")) {
+      if (/^https?:\/\//i.test(rawUrl)) return rawUrl;
+      if (rawUrl.startsWith("/")) return `https://www.freelancer.com${rawUrl}`;
+      if (/freelancer\.com\/projects\//i.test(rawUrl)) {
+        return rawUrl.startsWith("http") ? rawUrl : `https://${rawUrl.replace(/^\/+/, "")}`;
+      }
+      return `https://www.freelancer.com/projects/${rawUrl.replace(/^\/+/, "")}`;
+    }
+    const pid = String(row?.projectId || "").trim();
+    if (!pid || pid.startsWith("manual:")) return "";
+    if (/^https?:\/\//i.test(pid)) return pid;
+    if (/freelancer\.com\/projects\//i.test(pid)) {
+      return pid.startsWith("http") ? pid : `https://${pid.replace(/^\/+/, "")}`;
+    }
+    return `https://www.freelancer.com/projects/${pid.replace(/^\/+/, "")}`;
   }
 
   function esc(s) {
@@ -1552,6 +1560,7 @@
       <table class="navTable">
         <thead>
           <tr>
+            <th class="navTableHead navColNum">No</th>
             <th class="navTableHead">Project</th>
             <th class="navTableHead navColCenter">Chat</th>
             <th class="navTableHead navColCenter">Award</th>
@@ -1559,14 +1568,15 @@
           </tr>
         </thead>
         <tbody>
-          ${rows.map((r) => {
+          ${rows.map((r, i) => {
             const title = esc(r.projectTitle || r.projectId || "—");
-            const url = r.projectUrl ? esc(r.projectUrl) : "#";
+            const url = analyticsProjectDetailUrl(r);
             const when = r.createdAt ? esc(fmtDateTime(r.createdAt)) : "—";
             return `
               <tr class="navTableRow">
+                <td class="navTableCell navColNum muted">${i + 1}</td>
                 <td class="navTableCell navColWrap">
-                  ${r.projectUrl ? `<a href="${url}" target="_blank" rel="noopener">${title}</a>` : title}
+                  ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${title}</a>` : title}
                 </td>
                 <td class="navTableCell navColCenter">
                   <input type="checkbox" class="analyticsFlagCb" data-analytics-id="${r.id}" data-flag="chat"${r.isChat ? " checked" : ""} />
@@ -3048,7 +3058,6 @@
       const ok = await copyText(text);
       if (!ok) return;
       await recordBidAnalytics("copy");
-      rerenderList();
     });
 
     cutBtn.addEventListener("click", async () => {
@@ -3062,7 +3071,6 @@
       await recordBidAnalytics("cut");
       setBid("Use “Write bid” on a project row, or “Write bid (manual)”.", true);
       activeBidProject = null;
-      rerenderList();
       toast("Cut");
     });
 
@@ -3085,12 +3093,12 @@
 
     function rerenderList() {
       if (!listEl) return;
-      const items = visibleProjectItems();
+      const items = sortedProjectItems();
       const max = 50;
       const sliced = items.slice(0, max);
       listEl.innerHTML = sliced.length
         ? sliced.map((it) => renderListRow(it, it.id === selectedProjectId)).join("")
-        : `<div class="navTableEmpty">No new projects — copied ones are hidden.</div>`;
+        : `<div class="navTableEmpty">No projects yet.</div>`;
     }
 
     listEl?.addEventListener("click", (e) => {
