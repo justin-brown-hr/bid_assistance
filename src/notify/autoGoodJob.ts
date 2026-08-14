@@ -85,7 +85,13 @@ export function projectMaxBudgetUsd(project: Project): number | undefined {
 export function isPaymentVerified(project: Project): boolean {
   if (project.paymentVerified === true) return true;
   const text = String(project.clientVerificationText || "").toLowerCase();
-  return text.includes("payment");
+  return /\bpayment\b/.test(text);
+}
+
+function isHourlyFromProject(project: Project): boolean {
+  if (project.projIsHourly === true) return true;
+  const budget = String(project.budgetText || "").toLowerCase();
+  return budget.includes("hourly");
 }
 
 /**
@@ -104,7 +110,7 @@ export function shouldAutoGoodJob(
   if (maxUsd == null) {
     return { ok: false, reason: "budget unknown" };
   }
-  const hourly = project.projIsHourly === true;
+  const hourly = isHourlyFromProject(project);
   const min = hourly ? rules.hourlyMinUsd : rules.fixedMinUsd;
   const code = String(project.currencyCode || "USD").toUpperCase();
   if (!(maxUsd > min)) {

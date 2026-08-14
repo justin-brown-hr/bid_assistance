@@ -18,6 +18,7 @@ import {
   exchangeSlackUserToken,
   fetchSlackUserDisplayName,
   sendSlackProjectLink,
+  sendSlackProjectLinkAsApp,
 } from "./notify/slack.js";
 
 function parseAnalyticsRowId(pathname: string): number | null {
@@ -1562,6 +1563,40 @@ export class DashboardServer {
             const rows = this.db.listAdminBidAnalytics(period, sort, order);
             res.setHeader("content-type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ ok: true, period, sort, order, rows }));
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({ ok: false, error: msg }));
+          }
+        })();
+        return;
+      }
+
+      if (url.pathname === "/api/admin/test-auto-good-job" && req.method === "POST") {
+        (async () => {
+          try {
+            this.requireAdmin(req.headers.cookie);
+            if (!cfg.slack.enabled) throw new Error("SLACK_ENABLED is false");
+            if (!cfg.autoGoodJob.enabled) throw new Error("AUTO_GOOD_JOB_ENABLED is false");
+            const botOk = Boolean(cfg.slack.botToken?.trim() && cfg.slack.channelId?.trim());
+            const hookOk = Boolean(cfg.slack.webhookUrl?.trim());
+            if (!botOk && !hookOk) {
+              throw new Error("Missing SLACK_BOT_TOKEN+SLACK_CHANNEL_ID (or SLACK_WEBHOOK_URL) in server .env");
+            }
+            await sendSlackProjectLinkAsApp({
+              projectUrl: "https://www.freelancer.com/ — Freelancer Helper auto Good Job test",
+              channelId: cfg.slack.channelId,
+              botToken: cfg.slack.botToken,
+              webhookUrl: cfg.slack.webhookUrl,
+              appName: "Freelancer Helper",
+            });
+            res.setHeader("content-type", "application/json; charset=utf-8");
+            res.end(JSON.stringify({
+              ok: true,
+              message: "Test message posted to Slack as Freelancer Helper",
+              using: botOk ? "bot_token" : "webhook",
+            }));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             res.statusCode = msg === "Forbidden" ? 403 : msg === "Not logged in" ? 401 : 400;

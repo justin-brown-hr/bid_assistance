@@ -100,10 +100,21 @@ async function maybeAutoGoodJob(
     fixedMinUsd: cfg.autoGoodJob.fixedMinUsd,
     hourlyMinUsd: cfg.autoGoodJob.hourlyMinUsd,
   });
-  if (!check.ok) {
-    console.log(`[auto-good-job] skip ${project.id}: ${check.reason}`);
-    return;
-  }
+  const maxUsd = "maxBudgetUsd" in check ? check.maxBudgetUsd : undefined;
+  const pay = project.paymentVerified === true
+    || /\bpayment\b/i.test(String(project.clientVerificationText || ""));
+  const hourly = project.projIsHourly === true
+    || String(project.budgetText || "").toLowerCase().includes("hourly");
+  console.log(
+    `[auto-good-job] check ${project.id}`
+    + ` pay=${pay}`
+    + ` hourly=${hourly}`
+    + ` budget=${project.budgetText || "?"}`
+    + ` code=${project.currencyCode || "?"}`
+    + ` usd=${maxUsd != null ? maxUsd.toFixed(2) : (project.maxBudgetUsd ?? "?")}`
+    + ` => ${check.ok ? "SEND" : `skip (${check.reason})`}`,
+  );
+  if (!check.ok) return;
 
   const code = String(project.currencyCode || "USD").toUpperCase();
   try {
@@ -115,7 +126,7 @@ async function maybeAutoGoodJob(
       appName: "Freelancer Helper",
     });
     dashboard?.markSlackBotSent(project.id, project.url);
-    const kind = project.projIsHourly ? "hourly" : "fixed";
+    const kind = hourly ? "hourly" : "fixed";
     console.log(
       `[auto-good-job] sent ${project.id} (${kind} max ~$${check.maxBudgetUsd.toFixed(0)} USD from ${code}) as Freelancer Helper`,
     );
@@ -216,6 +227,20 @@ export async function startMonitor() {
   });
   await collector.init();
   console.log("[monitor] Real-time WebSocket monitor running. Waiting for new projects...");
+  {
+    const botOk = Boolean(cfg.slack.botToken?.trim() && cfg.slack.channelId?.trim());
+    const hookOk = Boolean(cfg.slack.webhookUrl?.trim());
+    console.log(
+      `[auto-good-job] enabled=${cfg.autoGoodJob.enabled && cfg.slack.enabled}`
+      + ` botToken=${botOk ? "yes" : "NO"}`
+      + ` webhook=${hookOk ? "yes" : "no"}`
+      + ` fixed>$${cfg.autoGoodJob.fixedMinUsd}`
+      + ` hourly>$${cfg.autoGoodJob.hourlyMinUsd}`,
+    );
+    if (cfg.autoGoodJob.enabled && cfg.slack.enabled && !botOk && !hookOk) {
+      console.warn("[auto-good-job] will NOT send — add SLACK_BOT_TOKEN (and SLACK_CHANNEL_ID) to .env, then restart");
+    }
+  }
 
   process.on("uncaughtException", (err) => {
     console.error("[error] Uncaught Exception:", err);

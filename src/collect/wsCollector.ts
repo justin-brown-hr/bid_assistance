@@ -78,14 +78,57 @@ const saveSession = saveFlSession;
 // Formatters
 // ---------------------------------------------------------------------------
 
+function truthyFlag(v: unknown): boolean {
+  return v === true || v === 1 || v === "1" || v === "true";
+}
+
+function isHourlyProject(d: WsProjectData): boolean {
+  if (truthyFlag(d.projIsHourly)) return true;
+  const t = String(d.type ?? "").toLowerCase();
+  return t.includes("hour");
+}
+
+function budgetMaxRaw(d: WsProjectData): number | undefined {
+  const any = d as WsProjectData & {
+    max_budget?: number;
+    budget?: { maximum?: number; minimum?: number };
+  };
+  const candidates = [d.maxbudget, any.max_budget, any.budget?.maximum, d.minbudget, any.budget?.minimum];
+  for (const n of candidates) {
+    if (typeof n === "number" && Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function budgetMinRaw(d: WsProjectData): number | undefined {
+  const any = d as WsProjectData & {
+    min_budget?: number;
+    budget?: { minimum?: number };
+  };
+  const candidates = [d.minbudget, any.min_budget, any.budget?.minimum];
+  for (const n of candidates) {
+    if (typeof n === "number" && Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function paymentVerifiedFrom(d: WsProjectData): boolean {
+  const s = d.client_status;
+  if (!s) return false;
+  return truthyFlag(s.payment_verified) || truthyFlag((s as { paymentVerified?: unknown }).paymentVerified);
+}
+
 function formatBudget(d: WsProjectData): string | undefined {
   const sign = d.currency?.sign ?? "$";
   const fmt = (n: number) => n.toLocaleString("en-US");
-  const type = d.projIsHourly ? "Hourly" : "Fixed";
-  if (d.minbudget != null && d.maxbudget != null) {
-    return `${type} ${sign}${fmt(d.minbudget)} – ${fmt(d.maxbudget)}`;
+  const type = isHourlyProject(d) ? "Hourly" : "Fixed";
+  const minB = budgetMinRaw(d);
+  const maxB = budgetMaxRaw(d);
+  if (minB != null && maxB != null && minB !== maxB) {
+    return `${type} ${sign}${fmt(minB)} – ${fmt(maxB)}`;
   }
-  if (d.minbudget != null) return `${type} ${sign}${fmt(d.minbudget)}+`;
+  if (maxB != null) return `${type} ${sign}${fmt(maxB)}`;
+  if (minB != null) return `${type} ${sign}${fmt(minB)}+`;
   return undefined;
 }
 
@@ -113,11 +156,13 @@ function exchangeRateToUsdFrom(d: WsProjectData): number {
 function formatVerification(s: WsProjectData["client_status"]): string | undefined {
   if (!s) return undefined;
   const verified: string[] = [];
-  if (s.identity_verified) verified.push("ID");
-  if (s.payment_verified) verified.push("Payment");
-  if (s.email_verified) verified.push("Mail");
-  if (s.phone_verified) verified.push("Phone");
-  if (s.profile_complete) verified.push("Profile");
+  if (truthyFlag(s.identity_verified)) verified.push("ID");
+  if (truthyFlag(s.payment_verified) || truthyFlag((s as { paymentVerified?: unknown }).paymentVerified)) {
+    verified.push("Payment");
+  }
+  if (truthyFlag(s.email_verified)) verified.push("Mail");
+  if (truthyFlag(s.phone_verified)) verified.push("Phone");
+  if (truthyFlag(s.profile_complete)) verified.push("Profile");
   return verified.length ? verified.join(", ") : "None";
 }
 
@@ -348,16 +393,14 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
   // Non-USD always converted before budget compares.
   const code = currencyCodeFrom(d);
   const exchangeRateToUsd = exchangeRateToUsdFrom(d);
+  const maxRaw = budgetMaxRaw(d);
+  const minRaw = budgetMinRaw(d);
   const maxBudgetUsd =
-    d.maxbudget != null && Number.isFinite(d.maxbudget)
-      ? d.maxbudget * exchangeRateToUsd
-      : d.minbudget != null && Number.isFinite(d.minbudget)
-        ? d.minbudget * exchangeRateToUsd
-        : undefined;
+    maxRaw != null ? maxRaw * exchangeRateToUsd : undefined;
   const minBudgetUsd =
-    d.minbudget != null && Number.isFinite(d.minbudget)
-      ? d.minbudget * exchangeRateToUsd
-      : undefined;
+    minRaw != null ? minRaw * exchangeRateToUsd : undefined;
+  const hourly = isHourlyProject(d);
+  const payVerified = paymentVerifiedFrom(d);
 
   return {
     id: String(d.id),
@@ -378,7 +421,7 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     clientCountry: country,
     clientCountryCode: userInfo?.countryCode,
     clientVerificationText: formatVerification(d.client_status),
-    paymentVerified: d.client_status?.payment_verified === true,
+    paymentVerified: payVerified,
     clientReviewText: formatClientReview(reviewOverall, reviewCount),
     clientReviewRating: normalizeRating(reviewOverall) ?? 0,
     clientReviewCount: reviewCount ?? 0,
@@ -386,7 +429,7 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     proposalsText: bidCount,
     scoreText,
     recruiter: d.recruiter === true,
-    projIsHourly: d.projIsHourly === true,
+    projIsHourly: hourly,
     joinDate,
   };
 }
