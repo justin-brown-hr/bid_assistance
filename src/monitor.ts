@@ -4,6 +4,8 @@ import { WsCollector } from "./collect/wsCollector.js";
 import { fastDecision } from "./fastFilter.js";
 import { SeenStore } from "./store/seenStore.js";
 import { TelegramClient } from "./notify/telegram.js";
+import { sendSlackProjectLinkAsApp } from "./notify/slack.js";
+import { shouldAutoGoodJob } from "./notify/autoGoodJob.js";
 import { DashboardServer } from "./dashboardServer.js";
 import type { Project } from "./types.js";
 
@@ -77,6 +79,41 @@ function clientCountryNameForProfile(project: Project): string | undefined {
   return project.clientCountryCode;
 }
 
+async function maybeAutoGoodJob(project: Project): Promise<void> {
+  if (!cfg.slack.enabled || !cfg.autoGoodJob.enabled) return;
+  const hasBot = Boolean(cfg.slack.botToken?.trim() && cfg.slack.channelId?.trim());
+  const hasWebhook = Boolean(cfg.slack.webhookUrl?.trim());
+  if (!hasBot && !hasWebhook) {
+    console.warn("[auto-good-job] skipped — set SLACK_BOT_TOKEN+SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL");
+    return;
+  }
+
+  const check = shouldAutoGoodJob(project, {
+    fixedMinUsd: cfg.autoGoodJob.fixedMinUsd,
+    hourlyMinUsd: cfg.autoGoodJob.hourlyMinUsd,
+  });
+  if (!check.ok) {
+    console.log(`[auto-good-job] skip ${project.id}: ${check.reason}`);
+    return;
+  }
+
+  try {
+    await sendSlackProjectLinkAsApp({
+      projectUrl: project.url,
+      channelId: cfg.slack.channelId,
+      botToken: cfg.slack.botToken,
+      webhookUrl: cfg.slack.webhookUrl,
+      appName: "Freelancer Helper",
+    });
+    const kind = project.projIsHourly ? "hourly" : "fixed";
+    console.log(
+      `[auto-good-job] sent ${project.id} (${kind} max ~$${check.maxBudgetUsd.toFixed(0)} USD) as Freelancer Helper`,
+    );
+  } catch (e) {
+    console.error("[auto-good-job] send failed", e instanceof Error ? e.message : e);
+  }
+}
+
 export async function startMonitor() {
   assertStartupConfig();
 
@@ -145,6 +182,9 @@ export async function startMonitor() {
     if (!decision.ok) {
       console.log(`[monitor] Filtered (UI only): ${p.title.slice(0, 40)} — ${decision.reasons.join(", ")}`);
     }
+
+    void maybeAutoGoodJob(p);
+
     if (!tg) return;
 
     // Send immediately

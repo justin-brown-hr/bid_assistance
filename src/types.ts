@@ -10,12 +10,18 @@ export type Project = {
   skills: string[];
   budgetText?: string;
   currencyCode?: string;
+  /** Max budget converted to USD (Freelancer exchange rate). */
+  maxBudgetUsd?: number;
+  /** Min budget converted to USD (when available). */
+  minBudgetUsd?: number;
   postedAtText?: string;
   clientName?: string;
   clientUsername?: string;
   clientCountry?: string;
   clientCountryCode?: string;
   clientVerificationText?: string;
+  /** True when Freelancer marks the client payment-verified. */
+  paymentVerified?: boolean;
   clientReviewText?: string;
   clientReviewRating?: number;
   clientReviewCount?: number;

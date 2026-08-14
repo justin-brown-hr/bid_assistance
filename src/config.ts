@@ -90,6 +90,11 @@ export const cfg = {
     botToken: getEnvOptional("SLACK_BOT_TOKEN"),
     webhookUrl: getEnvOptional("SLACK_WEBHOOK_URL"),
   },
+  autoGoodJob: {
+    enabled: (getEnvOptional("AUTO_GOOD_JOB_ENABLED") ?? "true").toLowerCase() !== "false",
+    fixedMinUsd: Number(getEnvOptional("AUTO_GOOD_JOB_FIXED_MIN_USD") ?? "260"),
+    hourlyMinUsd: Number(getEnvOptional("AUTO_GOOD_JOB_HOURLY_MIN_USD") ?? "21"),
+  },
 };
 
 export function assertStartupConfig() {

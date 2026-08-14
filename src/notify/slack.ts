@@ -117,3 +117,62 @@ export async function sendSlackProjectLink(opts: {
     text: opts.projectUrl,
   });
 }
+
+const AUTO_APP_NAME = "Freelancer Helper";
+
+/** Posts to #Good Job as the Freelancer Helper app (bot or webhook). */
+export async function sendSlackProjectLinkAsApp(opts: {
+  projectUrl: string;
+  channelId?: string;
+  botToken?: string;
+  webhookUrl?: string;
+  appName?: string;
+}): Promise<void> {
+  const text = opts.projectUrl.trim();
+  if (!text) throw new Error("Project URL is required");
+  const appName = (opts.appName || AUTO_APP_NAME).trim() || AUTO_APP_NAME;
+
+  const botToken = opts.botToken?.trim();
+  const channelId = opts.channelId?.trim();
+  if (botToken && channelId) {
+    const res = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        authorization: `Bearer ${botToken}`,
+      },
+      body: JSON.stringify({
+        channel: channelId,
+        text,
+        username: appName,
+        unfurl_links: true,
+        unfurl_media: true,
+      }),
+    });
+    const json = (await res.json()) as SlackApiResponse;
+    if (!json.ok) {
+      throw new Error(slackApiErrorMessage(json.error));
+    }
+    return;
+  }
+
+  const webhookUrl = opts.webhookUrl?.trim();
+  if (webhookUrl) {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        text,
+        username: appName,
+        unfurl_links: true,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Slack webhook failed (${res.status})${body ? `: ${body}` : ""}`);
+    }
+    return;
+  }
+
+  throw new Error("Set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID (or SLACK_WEBHOOK_URL) for auto Good Job");
+}

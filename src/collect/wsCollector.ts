@@ -328,6 +328,19 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     completionRateText = `${reviews}/${completed} (${ratio})`;
   }
 
+  // Freelancer exchangerate converts local currency → USD (multiply).
+  const exchangeRate = parseFloat(d.currency?.exchangerate ?? "1") || 1;
+  const maxBudgetUsd =
+    d.maxbudget != null && Number.isFinite(d.maxbudget)
+      ? d.maxbudget * exchangeRate
+      : d.minbudget != null && Number.isFinite(d.minbudget)
+        ? d.minbudget * exchangeRate
+        : undefined;
+  const minBudgetUsd =
+    d.minbudget != null && Number.isFinite(d.minbudget)
+      ? d.minbudget * exchangeRate
+      : undefined;
+
   return {
     id: String(d.id),
     title: d.title,
@@ -336,6 +349,8 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     skills,
     budgetText: formatBudget(d),
     currencyCode: currencyCodeFrom(d),
+    maxBudgetUsd,
+    minBudgetUsd,
     postedAtText: d.time_submitted
       ? new Date(d.time_submitted * 1000).toISOString()
       : undefined,
@@ -344,6 +359,7 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     clientCountry: country,
     clientCountryCode: userInfo?.countryCode,
     clientVerificationText: formatVerification(d.client_status),
+    paymentVerified: d.client_status?.payment_verified === true,
     clientReviewText: formatClientReview(reviewOverall, reviewCount),
     clientReviewRating: normalizeRating(reviewOverall) ?? 0,
     clientReviewCount: reviewCount ?? 0,
