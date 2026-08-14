@@ -1990,8 +1990,14 @@ export class DashboardServer {
       .adminPageHeader {
         flex-shrink: 0;
         margin-bottom: 12px;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
       }
       .adminPageHeader h2 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
+      .adminPageHeaderActions { flex-shrink: 0; }
       .adminPageSub { margin: 0; font-size: 12px; color: var(--muted); }
       .adminTabs {
         display: flex;

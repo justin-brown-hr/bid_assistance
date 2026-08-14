@@ -1886,8 +1886,13 @@
     render(`
       <div class="adminPage">
         <div class="adminPageHeader">
-          <h2>Admin</h2>
-          <p class="adminPageSub">Manage users and shared OpenRouter API keys</p>
+          <div>
+            <h2>Admin</h2>
+            <p class="adminPageSub">Manage users and shared OpenRouter API keys</p>
+          </div>
+          <div class="adminPageHeaderActions">
+            <button type="button" class="btnPrimary" id="adminTestGoodJobBtn" title="Post a test message to #Good Job as Freelancer Helper">Send test to Good Job</button>
+          </div>
         </div>
         <div class="adminTabs">
           <button type="button" class="adminTab ${adminTab === "users" ? "adminTabActive" : ""}" data-tab="users">Users</button>
@@ -1913,6 +1918,28 @@
     `);
     document.querySelectorAll(".adminTab").forEach((btn) => {
       btn.addEventListener("click", () => switchAdminTab(btn.getAttribute("data-tab") || "users"));
+    });
+    document.getElementById("adminTestGoodJobBtn")?.addEventListener("click", async () => {
+      const btn = document.getElementById("adminTestGoodJobBtn");
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Sending…";
+      }
+      try {
+        const j = await api("/api/admin/test-auto-good-job", { method: "POST" });
+        toast(j.message || "Test sent to Good Job");
+        void appAlert(
+          (j.message || "Test message posted.") + (j.using ? `\n\nUsing: ${j.using}` : ""),
+          { title: "Good Job test" },
+        );
+      } catch (e) {
+        void appAlert(e?.message || String(e), { title: "Good Job test failed" });
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Send test to Good Job";
+        }
+      }
     });
     void mountAdminPanel();
   }
