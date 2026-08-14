@@ -79,12 +79,20 @@ function clientCountryNameForProfile(project: Project): string | undefined {
   return project.clientCountryCode;
 }
 
-async function maybeAutoGoodJob(project: Project): Promise<void> {
+async function maybeAutoGoodJob(
+  project: Project,
+  dashboard: DashboardServer | null,
+): Promise<void> {
   if (!cfg.slack.enabled || !cfg.autoGoodJob.enabled) return;
   const hasBot = Boolean(cfg.slack.botToken?.trim() && cfg.slack.channelId?.trim());
   const hasWebhook = Boolean(cfg.slack.webhookUrl?.trim());
   if (!hasBot && !hasWebhook) {
     console.warn("[auto-good-job] skipped — set SLACK_BOT_TOKEN+SLACK_CHANNEL_ID or SLACK_WEBHOOK_URL");
+    return;
+  }
+
+  if (dashboard?.isSlackBotSent(project.id)) {
+    console.log(`[auto-good-job] skip ${project.id}: already sent by bot`);
     return;
   }
 
@@ -97,6 +105,7 @@ async function maybeAutoGoodJob(project: Project): Promise<void> {
     return;
   }
 
+  const code = String(project.currencyCode || "USD").toUpperCase();
   try {
     await sendSlackProjectLinkAsApp({
       projectUrl: project.url,
@@ -105,9 +114,10 @@ async function maybeAutoGoodJob(project: Project): Promise<void> {
       webhookUrl: cfg.slack.webhookUrl,
       appName: "Freelancer Helper",
     });
+    dashboard?.markSlackBotSent(project.id, project.url);
     const kind = project.projIsHourly ? "hourly" : "fixed";
     console.log(
-      `[auto-good-job] sent ${project.id} (${kind} max ~$${check.maxBudgetUsd.toFixed(0)} USD) as Freelancer Helper`,
+      `[auto-good-job] sent ${project.id} (${kind} max ~$${check.maxBudgetUsd.toFixed(0)} USD from ${code}) as Freelancer Helper`,
     );
   } catch (e) {
     console.error("[auto-good-job] send failed", e instanceof Error ? e.message : e);
@@ -183,7 +193,7 @@ export async function startMonitor() {
       console.log(`[monitor] Filtered (UI only): ${p.title.slice(0, 40)} — ${decision.reasons.join(", ")}`);
     }
 
-    void maybeAutoGoodJob(p);
+    void maybeAutoGoodJob(p, dashboard);
 
     if (!tg) return;
 

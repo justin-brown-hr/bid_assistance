@@ -10,7 +10,7 @@ export const DEFAULT_AUTO_GOOD_JOB_RULES: AutoGoodJobRules = {
   hourlyMinUsd: 21,
 };
 
-/** Rough USD rates when Freelancer exchange rate is missing (local units × rate ≈ USD). */
+/** Rough USD rates when Freelancer exchange rate is missing (local × rate ≈ USD). */
 const FALLBACK_TO_USD: Record<string, number> = {
   USD: 1,
   AUD: 0.65,
@@ -47,15 +47,39 @@ function parseMaxFromBudgetText(budgetText: string | undefined): number | undefi
   return Math.max(...valid);
 }
 
+/** Rate that converts 1 unit of project currency → USD. */
+export function usdRateForProject(project: Project): number {
+  const code = String(project.currencyCode || "USD").toUpperCase();
+  if (code === "USD" || code === "US$") return 1;
+  if (
+    typeof project.exchangeRateToUsd === "number"
+    && Number.isFinite(project.exchangeRateToUsd)
+    && project.exchangeRateToUsd > 0
+  ) {
+    return project.exchangeRateToUsd;
+  }
+  return FALLBACK_TO_USD[code] ?? 1;
+}
+
+/**
+ * Max budget in USD for comparison.
+ * Non-USD amounts are always converted (Freelancer rate, else fallback table).
+ */
 export function projectMaxBudgetUsd(project: Project): number | undefined {
+  const code = String(project.currencyCode || "USD").toUpperCase();
+  const isUsd = code === "USD" || code === "US$" || !project.currencyCode;
+
+  // Prefer collector-computed USD when present and currency was converted.
   if (typeof project.maxBudgetUsd === "number" && Number.isFinite(project.maxBudgetUsd)) {
+    // If currency is USD, value is already USD.
+    // If non-USD, collector should have multiplied by Freelancer exchangerate.
     return project.maxBudgetUsd;
   }
+
   const raw = parseMaxFromBudgetText(project.budgetText);
   if (raw == null) return undefined;
-  const code = String(project.currencyCode || "USD").toUpperCase();
-  const rate = FALLBACK_TO_USD[code] ?? 1;
-  return raw * rate;
+  if (isUsd) return raw;
+  return raw * usdRateForProject(project);
 }
 
 export function isPaymentVerified(project: Project): boolean {
@@ -82,12 +106,13 @@ export function shouldAutoGoodJob(
   }
   const hourly = project.projIsHourly === true;
   const min = hourly ? rules.hourlyMinUsd : rules.fixedMinUsd;
+  const code = String(project.currencyCode || "USD").toUpperCase();
   if (!(maxUsd > min)) {
     return {
       ok: false,
       reason: hourly
-        ? `hourly max $${maxUsd.toFixed(2)} ≤ $${min}/hr`
-        : `fixed max $${maxUsd.toFixed(2)} ≤ $${min}`,
+        ? `hourly max ~$${maxUsd.toFixed(2)} USD (${code}) ≤ $${min}/hr`
+        : `fixed max ~$${maxUsd.toFixed(2)} USD (${code}) ≤ $${min}`,
     };
   }
   return { ok: true, maxBudgetUsd: maxUsd };

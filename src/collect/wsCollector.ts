@@ -94,6 +94,22 @@ function currencyCodeFrom(d: WsProjectData): string {
   return String(raw).toUpperCase();
 }
 
+/** Fallback local→USD when Freelancer exchangerate is missing. */
+const FALLBACK_TO_USD: Record<string, number> = {
+  USD: 1, AUD: 0.65, CAD: 0.73, EUR: 1.08, GBP: 1.27, NZD: 0.60, SGD: 0.74,
+  INR: 0.012, PKR: 0.0036, HKD: 0.13, JPY: 0.0067, CHF: 1.12, SEK: 0.095,
+  NOK: 0.092, DKK: 0.145, ZAR: 0.055, MXN: 0.055, BRL: 0.18, PHP: 0.017,
+  MYR: 0.22, THB: 0.028, IDR: 0.000063, AED: 0.27, SAR: 0.27,
+};
+
+function exchangeRateToUsdFrom(d: WsProjectData): number {
+  const code = currencyCodeFrom(d);
+  if (code === "USD") return 1;
+  const rawRate = parseFloat(d.currency?.exchangerate ?? "");
+  if (Number.isFinite(rawRate) && rawRate > 0) return rawRate;
+  return FALLBACK_TO_USD[code] ?? 1;
+}
+
 function formatVerification(s: WsProjectData["client_status"]): string | undefined {
   if (!s) return undefined;
   const verified: string[] = [];
@@ -329,16 +345,18 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
   }
 
   // Freelancer exchangerate converts local currency → USD (multiply).
-  const exchangeRate = parseFloat(d.currency?.exchangerate ?? "1") || 1;
+  // Non-USD always converted before budget compares.
+  const code = currencyCodeFrom(d);
+  const exchangeRateToUsd = exchangeRateToUsdFrom(d);
   const maxBudgetUsd =
     d.maxbudget != null && Number.isFinite(d.maxbudget)
-      ? d.maxbudget * exchangeRate
+      ? d.maxbudget * exchangeRateToUsd
       : d.minbudget != null && Number.isFinite(d.minbudget)
-        ? d.minbudget * exchangeRate
+        ? d.minbudget * exchangeRateToUsd
         : undefined;
   const minBudgetUsd =
     d.minbudget != null && Number.isFinite(d.minbudget)
-      ? d.minbudget * exchangeRate
+      ? d.minbudget * exchangeRateToUsd
       : undefined;
 
   return {
@@ -348,9 +366,10 @@ function wsDataToProject(d: WsProjectData, userInfo?: UserInfo): Project {
     description: d.appended_descr,
     skills,
     budgetText: formatBudget(d),
-    currencyCode: currencyCodeFrom(d),
+    currencyCode: code,
     maxBudgetUsd,
     minBudgetUsd,
+    exchangeRateToUsd,
     postedAtText: d.time_submitted
       ? new Date(d.time_submitted * 1000).toISOString()
       : undefined,

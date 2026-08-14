@@ -14,6 +14,8 @@ export type Project = {
   maxBudgetUsd?: number;
   /** Min budget converted to USD (when available). */
   minBudgetUsd?: number;
+  /** Multiply local currency by this to get USD (from Freelancer). */
+  exchangeRateToUsd?: number;
   postedAtText?: string;
   clientName?: string;
   clientUsername?: string;

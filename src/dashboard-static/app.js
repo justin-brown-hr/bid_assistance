@@ -1350,7 +1350,8 @@
     };
   }
 
-  function slackSendButtonLabel() {
+  function slackSendButtonLabel(item) {
+    if (item?.slackBotSent) return "Already sent (bot)";
     if (!settings?.hasSlackConnected) {
       return "Send to Good Job (connect Slack in Profile)";
     }
@@ -3094,6 +3095,7 @@
     const rate = parseRateBar(p.completionRateText);
     const verifHtml = renderVerifIcons(p.clientVerificationText);
     const isNewHighlight = newProjectHighlights.has(item.id);
+    const slackBotSent = item.slackBotSent === true;
     return `
       <div class="listRow${isSelected ? " listRowActive" : ""}${isNewHighlight ? " listRowNew" : ""}" data-id="${esc(item.id)}" role="button" tabindex="0">
         <div class="listRowTop">
@@ -3112,7 +3114,7 @@
             ${renderClientReview(p)}
           </div>
           <div class="listRowActions">
-            <button class="btn slackSendBtn" type="button" data-action="send-slack" data-id="${esc(item.id)}" title="Post project URL to Good Job on Slack">${esc(slackSendButtonLabel())}</button>
+            <button class="btn slackSendBtn" type="button" data-action="send-slack" data-id="${esc(item.id)}"${slackBotSent ? " disabled" : ""} title="${slackBotSent ? "Already sent to Good Job by Freelancer Helper bot" : "Post project URL to Good Job on Slack"}">${esc(slackSendButtonLabel(item))}</button>
             <button class="btnPrimary" type="button" data-action="write-bid" data-id="${esc(item.id)}">Write bid</button>
             <div class="listRowStats">
               ${renderProgBar("Cool", cool)}
@@ -3285,6 +3287,10 @@
         if (action === "send-slack") {
           e.preventDefault();
           e.stopPropagation();
+          if (item.slackBotSent) {
+            toast("Already sent by Freelancer Helper bot");
+            return;
+          }
           const btn = actionEl;
           btn.disabled = true;
           btn.textContent = "Sending…";
@@ -3295,8 +3301,8 @@
             } catch (err) {
               void appAlert("Error: " + (err?.message || String(err)));
             } finally {
-              btn.disabled = false;
-              btn.textContent = slackSendButtonLabel();
+              btn.disabled = item.slackBotSent === true;
+              btn.textContent = slackSendButtonLabel(item);
             }
           })();
           return;

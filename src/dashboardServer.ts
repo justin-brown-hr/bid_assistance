@@ -415,6 +415,8 @@ export type DashboardItem = {
   project: Project;
   decision: FastDecision;
   notified: boolean;
+  /** True when Auto Good Job already posted this project as Freelancer Helper. */
+  slackBotSent?: boolean;
 };
 
 function escHtml(s: string): string {
@@ -1208,6 +1210,10 @@ export class DashboardServer {
             const body = (await this.readJsonBody(req)) as { project?: Project };
             const project = body.project;
             if (!project?.url?.trim()) throw new Error("Project URL is required");
+            const projectId = String(project.id || "").trim();
+            if (projectId && this.isSlackBotSent(projectId)) {
+              throw new Error("Already sent to Good Job by Freelancer Helper bot");
+            }
             await sendSlackProjectLink({
               projectUrl: project.url,
               userToken,
@@ -1615,7 +1621,9 @@ export class DashboardServer {
 
   record(item: Omit<DashboardItem, "id">): void {
     const id = `${item.project.id}:${item.foundAt}`;
-    const full: DashboardItem = { ...item, id };
+    const slackBotSent = item.slackBotSent === true
+      || Boolean(this.db?.hasSlackBotSent(item.project.id));
+    const full: DashboardItem = { ...item, id, slackBotSent };
     this.items.unshift(full);
     const max = this.opts.maxItems ?? 200;
     if (this.items.length > max) this.items.splice(max);
@@ -1627,6 +1635,29 @@ export class DashboardServer {
     if (!it || it.notified) return;
     it.notified = true;
     this.broadcast({ type: "update", item: it });
+  }
+
+  markSlackBotSent(projectId: string, projectUrl?: string | null): void {
+    try {
+      this.db?.markSlackBotSent(projectId, projectUrl);
+    } catch (e) {
+      console.error("[dashboard] markSlackBotSent failed", e);
+    }
+    for (const it of this.items) {
+      if (it.project.id !== projectId) continue;
+      if (it.slackBotSent) continue;
+      it.slackBotSent = true;
+      this.broadcast({ type: "update", item: it });
+    }
+  }
+
+  isSlackBotSent(projectId: string): boolean {
+    if (this.items.some((x) => x.project.id === projectId && x.slackBotSent)) return true;
+    try {
+      return Boolean(this.db?.hasSlackBotSent(projectId));
+    } catch {
+      return false;
+    }
   }
 
   private broadcast(obj: unknown): void {
@@ -3224,6 +3255,10 @@ export class DashboardServer {
         line-height: 1.25;
         font-size: 12px;
         padding: 8px 10px;
+      }
+      .listRowActions .slackSendBtn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
       }
       .listRowStats {
         width: 100%;

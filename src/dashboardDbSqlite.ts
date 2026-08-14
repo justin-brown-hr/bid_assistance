@@ -150,6 +150,12 @@ export class DashboardDbSqlite {
 
       CREATE INDEX IF NOT EXISTS idx_bid_analytics_user_time
         ON bid_analytics(username, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS slack_bot_sent (
+        project_id TEXT PRIMARY KEY,
+        project_url TEXT,
+        sent_at INTEGER NOT NULL
+      );
     `);
 
     try {
@@ -1527,6 +1533,37 @@ export class DashboardDbSqlite {
       return ((av as number) - (bv as number)) * dir;
     });
     return mapped;
+  }
+
+  markSlackBotSent(projectId: string, projectUrl?: string | null): void {
+    if (!this.db) throw new Error("DB not connected");
+    const id = String(projectId ?? "").trim();
+    if (!id) return;
+    this.db.prepare(`
+      INSERT INTO slack_bot_sent (project_id, project_url, sent_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        project_url = COALESCE(excluded.project_url, slack_bot_sent.project_url),
+        sent_at = excluded.sent_at
+    `).run(id, projectUrl ?? null, Date.now());
+  }
+
+  hasSlackBotSent(projectId: string): boolean {
+    if (!this.db) throw new Error("DB not connected");
+    const id = String(projectId ?? "").trim();
+    if (!id) return false;
+    const row = this.db.prepare(
+      "SELECT 1 AS ok FROM slack_bot_sent WHERE project_id = ?",
+    ).get(id) as { ok: number } | undefined;
+    return Boolean(row);
+  }
+
+  listSlackBotSentProjectIds(): string[] {
+    if (!this.db) throw new Error("DB not connected");
+    const rows = this.db.prepare(
+      "SELECT project_id FROM slack_bot_sent ORDER BY sent_at DESC",
+    ).all() as Array<{ project_id: string }>;
+    return rows.map((r) => r.project_id);
   }
 }
 
